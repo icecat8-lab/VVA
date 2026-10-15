@@ -1,0 +1,17 @@
+#version 450
+layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(binding = 0, std430) readonly buffer InputTensor { float in_data[]; };
+layout(binding = 1, std430) readonly buffer GammaTensor { float gamma_data[]; };
+layout(binding = 2, std430) readonly buffer BetaTensor  { float beta_data[]; };
+layout(binding = 3, std430) writeonly buffer OutputTensor{ float out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    int channels;
+    int spatial_size;
+    float epsilon;
+} params;
+
+void main() {
+    int idx = int(gl_GlobalInvocationID.x);
+}
