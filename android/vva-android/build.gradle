@@ -1,0 +1,9 @@
+plugins { id 'com.android.library' }
+android {
+    compileSdk 34
+    defaultConfig {
+        minSdk 26
+        externalNativeBuild { cmake { cppFlags "-std=c++17"; arguments "-DANDROID_STL=c++_shared" } }
+    }
+    externalNativeBuild { cmake { path "src/main/cpp/CMakeLists.txt" } }
+}
