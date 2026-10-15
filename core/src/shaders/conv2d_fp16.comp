@@ -1,0 +1,45 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout (local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0, std430) readonly buffer InputTensor { float16_t in_data[]; };
+layout(binding = 1, std430) readonly buffer WeightTensor { float16_t w_data[]; };
+layout(binding = 2, std430) readonly buffer BiasTensor   { float16_t b_data[]; };
+layout(binding = 3, std430) writeonly buffer OutputTensor{ float16_t out_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    int in_channels;
+    int out_channels;
+    int width;
+    int height;
+    int kernel_size;
+} params;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    int oc = int(gl_GlobalInvocationID.z);
+
+    if (pos.x >= params.width || pos.y >= params.height) return;
+
+    float16_t sum = b_data[oc];
+    int half_k = params.kernel_size / 2;
+
+    for (int ic = 0; ic < params.in_channels; ic++) {
+        for (int ky = -half_k; ky <= half_k; ky++) {
+            for (int kx = -half_k; kx <= half_k; kx++) {
+                int in_x = clamp(pos.x + kx, 0, params.width - 1);
+                int in_y = clamp(pos.y + ky, 0, params.height - 1);
+                
+                int in_idx = (ic * params.height + in_y) * params.width + in_x;
+                int w_idx = (oc * params.in_channels + ic) * (params.kernel_size * params.kernel_size) + 
+                            ((ky + half_k) * params.kernel_size + (kx + half_k));
+
+                sum += in_data[in_idx] * w_data[w_idx];
+            }
+        }
+    }
+
+    int out_idx = (oc * params.height + pos.y) * params.width + pos.x;
+    out_data[out_idx] = sum;
+}
