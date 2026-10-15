@@ -1,33 +1,102 @@
-name: Build AAR
+name: Build VVA
 
 on:
-  release:
-    types: [published]
-  workflow_dispatch: # ทำให้กดปุ่มรันเองจากหน้าเว็บได้
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      NDK_VERSION: 26.3.11579264
+      TAG: ${{ inputs.version_tag }}
+
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      
+      - name: Checkout
+        uses: actions/checkout@v5
+
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
-          
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.4'
-          
-      - name: Build with Gradle
-        run: gradle :android:assembleRelease --no-daemon
-        
-      - name: Upload AAR Artifact
+          gradle-version: '8.7'
+
+      - name: Build AAR
+        run: gradle :vva-android:assembleRelease --no-daemon --stacktrace
+
+      - name: Locate NDK
+        run: |
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          NDK="$SDK/ndk/$NDK_VERSION"
+          test -d "$NDK" || { echo "::error::NDK not found at $NDK"; exit 1; }
+          echo "NDK=$NDK" >> "$GITHUB_ENV"
+
+      - name: Build native SDK (libvva.so and vva-cli)
+        run: |
+          cmake -S . -B build-native \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-26 \
+            -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DVVA_BUILD_SHARED=ON \
+            -DVVA_BUILD_CLI=ON
+          cmake --build build-native --parallel
+
+      - name: Compile shaders (informational, not used by the build yet)
+        continue-on-error: true
+        run: |
+          GLSLC="$NDK/shader-tools/linux-x86_64/glslc"
+          mkdir -p build-shaders
+          FAILED=0
+          for f in core/src/shaders/*.comp; do
+            if "$GLSLC" -O "$f" -o "build-shaders/$(basename "$f").spv"; then
+              echo "OK   $f"
+            else
+              echo "FAIL $f"
+              FAILED=1
+            fi
+          done
+          exit $FAILED
+
+      - name: Collect release files
+        run: |
+          mkdir -p dist
+          AAR="$(find android/vva-android/build/outputs/aar -name '*-release.aar' | head -n 1)"
+          test -n "$AAR" || { echo "::error::release AAR not found"; exit 1; }
+          cp "$AAR" "dist/vva-android-$TAG.aar"
+          cp build-native/vva-cli dist/vva-cli-arm64-v8a
+          cp build-native/libvva.so dist/libvva-arm64-v8a.so
+
+          LIST="$(unzip -l "dist/vva-android-$TAG.aar")"
+          echo "$LIST"
+          case "$LIST" in
+            *jni/arm64-v8a/libvva_engine.so*) ;;
+            *) echo "::error::AAR does not contain libvva_engine.so"; exit 1 ;;
+          esac
+          ls -l dist
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: vva-android-aar
-          path: android/build/outputs/aar/android-release.aar
+          name: vva-dist
+          path: dist/*
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version_tag }}
+          name: VVA ${{ inputs.version_tag }}
+          files: dist/*
