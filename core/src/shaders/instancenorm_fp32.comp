@@ -1,5 +1,7 @@
 #version 450
-layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+
+layout (local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 
 layout(binding = 0, std430) readonly buffer InputTensor { float in_data[]; };
 layout(binding = 1, std430) readonly buffer GammaTensor { float gamma_data[]; };
@@ -13,5 +15,33 @@ layout(push_constant) uniform PushConstants {
 } params;
 
 void main() {
-    int idx = int(gl_GlobalInvocationID.x);
+    int c = int(gl_GlobalInvocationID.x);
+    if (c >= params.channels) return;
+
+    int offset = c * params.spatial_size;
+    
+    
+    float sum = 0.0;
+    for (int i = 0; i < params.spatial_size; i++) {
+        sum += in_data[offset + i];
+    }
+    float mean = sum / float(params.spatial_size);
+
+    
+    float var_sum = 0.0;
+    for (int i = 0; i < params.spatial_size; i++) {
+        float diff = in_data[offset + i] - mean;
+        var_sum += diff * diff;
+    }
+    float variance = var_sum / float(params.spatial_size);
+
+    
+    float inv_std = inversesqrt(variance + params.epsilon);
+    float gamma = gamma_data[c];
+    float beta = beta_data[c];
+
+    for (int i = 0; i < params.spatial_size; i++) {
+        float val = in_data[offset + i];
+        out_data[offset + i] = ((val - mean) * inv_std) * gamma + beta;
+    }
 }
