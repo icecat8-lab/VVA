@@ -2,9 +2,15 @@ plugins {
     id 'com.android.library' version '8.1.0'
 }
 
+// 1. เพิ่มบล็อกนี้เพื่อให้โปรเจกต์รู้แหล่งดาวน์โหลดเครื่องมือเสริม (เช่น AAPT2)
+repositories {
+    google()
+    mavenCentral()
+}
+
 android {
-    namespace 'com.example.vva' // ถ้ามีชื่อ package จริงๆ ของโค้ด C++/Java ให้เปลี่ยนตรงนี้ให้ตรงกันครับ
-    compileSdk 34
+    namespace 'com.example.vva' 
+    compileSdk 33 // 2. ปรับลงมาเป็น 33 เพื่อให้ตรงกับเวอร์ชันที่ปลั๊กอินรองรับ 100%
 
     defaultConfig {
         minSdk 24
