@@ -1,57 +1,89 @@
 # VVA Framework (Visual Processing Architecture)
 
-VVA is an AI inference engine purpose-built for **Super-Resolution and Image-to-Image tasks on Android**. 
+An AI inference engine built for **super-resolution and image-to-image tasks on Android**.
 
-The goal of this project is to eliminate the performance bottlenecks found in standard, general-purpose AI frameworks. VVA is designed to extract maximum performance from modern mobile hardware, focusing on extreme execution speed, memory efficiency, and flawless visual quality.
+VVA targets the bottlenecks of general-purpose AI frameworks: execution speed, memory use, and visual fidelity when processing large images on mobile hardware.
 
 ## Key Features
 
-* **Zero-Copy Memory Pipeline:** Bypasses CPU-to-GPU memory copying by feeding images directly into the GPU/NPU via Android's `AHardwareBuffer`. This reduces device heating and prevents Out-Of-Memory (OOM) crashes when processing large, high-resolution images.
-* **100% Quality Mixed Precision:** Automatically compresses primary model weights to FP16 for fast loading and execution, while intelligently retaining FP32 for precision-sensitive layers (such as LayerNorm or Output layers). This ensures perfect color accuracy and zero visual artifacts.
-* **NPU & Vulkan First:** Offloads heavy tensor computations to the NPU via Android NNAPI, while utilizing Vulkan Compute Shaders for spatial upscaling and pixel manipulation.
+- **Zero-copy memory pipeline** — images are passed straight to the GPU/NPU through Android's `AHardwareBuffer`, avoiding CPU-to-GPU copies. This lowers memory pressure and helps when processing large, high-resolution images.
+- **Mixed precision (FP16 + FP32)** — main model weights are stored as FP16 for fast loading and execution, while precision-sensitive layers (such as LayerNorm or output layers) stay in FP32 to preserve color accuracy.
+- **NPU + Vulkan** — heavy tensor computation is offloaded to the NPU through Android NNAPI, while Vulkan compute shaders handle spatial upscaling and pixel manipulation.
+
+## How it works
+
+```
+PyTorch checkpoint (.pth)
+        │  vva-convert
+        ▼
+my_upscaler.vva  +  my_upscaler.json
+        │  VVAEngine.init()
+        ▼
+HardwareBuffer (input) ──► VVAEngine.processZeroCopy() ──► HardwareBuffer (output)
+```
+
+## Requirements
+
+- **Converter:** Python 3 on a PC, Google Colab, or Termux.
+- **Android:** the APIs VVA builds on set the minimum versions: `HardwareBuffer` needs Android 8.0 (API 26)+, NNAPI needs Android 8.1 (API 27)+, and Vulkan compute needs a Vulkan-capable GPU.
+
+## Quick start
+
+1. **Install** the converter (see [Installation](#1-installation)).
+2. **Convert** your `.pth` checkpoint to `.vva` (see [Converting a model](#2-converting-a-model)).
+3. **Add** the `core/` and `android/` modules to your Android project and call `VVAEngine` (see [Android integration](#3-android-integration)).
+
+## Project structure
+
+| Folder | Contents |
+|---|---|
+| `python/` | Toolkit for converting PyTorch models into the `.vva` format |
+| `core/` | C++ execution core (engine, memory mapping, shaders, task scheduler) |
+| `android/` | Android library module (`.aar` / `.so`) and sample project |
 
 ---
 
-## Project Structure
+## 1. Installation
 
-* `python/` - Toolkit for converting PyTorch models into the `.vva` format.
-* `core/` - The C++ execution core (Engine, Memory Mapping, Shaders, Task Scheduler).
-* `android/` - Android library module (.aar/.so) and sample project for seamless integration.
+The conversion toolkit is lightweight and runs on a standard PC, Google Colab, or mobile environments such as Termux.
 
----
-
-## 1. Installation & Model Conversion (CLI)
-
-The conversion toolkit is lightweight, easy to install, and can run on a standard PC, Google Colab, or even mobile environments like Termux.
-
-### Installation
-Clone the repository and install the package locally:
 ```bash
 git clone https://github.com/icecat8-lab/VVA.git
 cd VVA/python
 pip install -e .
 ```
 
-### Converting a Model
-Prepare your PyTorch model checkpoint (`.pth`) and execute the conversion command. The tool will automatically inspect the layer topology and compile the binary:
+## 2. Converting a model
+
+Prepare your PyTorch checkpoint (`.pth`) and run:
+
 ```bash
 vva-convert --input /path/to/my_upscaler.pth --output /path/to/my_upscaler.vva
 ```
-*Note: The script automatically generates a paired `.json` metadata file alongside your `.vva` binary for seamless parsing in native code.*
 
----
+The tool inspects the layer topology and compiles the binary. It also writes a paired `.json` metadata file next to the `.vva` file for parsing in native code — keep both files together.
 
-## 2. Android Integration Guide
+## 3. Android integration
 
-To integrate the inference engine into your Android application, include the `core/` and `android/` modules within your Android Studio project structure.
+### Add the module
 
-### Project Setup (`settings.gradle`)
+In `settings.gradle`:
+
 ```gradle
 include ':app', ':vva-android'
 ```
 
-### Usage in Android (Java / Kotlin)
-Place your compiled `.vva` model file into your device storage or project assets. Initialize the engine and process images using the Zero-Copy hardware buffer pipeline:
+In your app module's `build.gradle`:
+
+```gradle
+dependencies {
+    implementation project(':vva-android')
+}
+```
+
+### Use it (Java)
+
+Put the converted `.vva` file in your device storage or project assets, then initialize the engine and process images through the zero-copy pipeline:
 
 ```java
 import com.vva.engine.VVAEngine;
@@ -61,16 +93,40 @@ import android.hardware.HardwareBuffer;
 VVAEngine engine = new VVAEngine();
 engine.init("/path/to/my_upscaler.vva");
 
-// 2. Process image frames directly via the Zero-Copy pipeline
-// (Both inputBuffer and outputBuffer must be standard Android AHardwareBuffers)
+// 2. Process an image through the zero-copy pipeline
+//    (inputBuffer and outputBuffer must both be Android HardwareBuffers)
 engine.processZeroCopy(inputBuffer, outputBuffer);
+```
+
+### Use it (Kotlin)
+
+```kotlin
+import android.hardware.HardwareBuffer
+import com.vva.engine.VVAEngine
+
+val engine = VVAEngine()
+engine.init("/path/to/my_upscaler.vva")
+engine.processZeroCopy(inputBuffer, outputBuffer)
 ```
 
 ---
 
-## Customization & Further Development
+## Supported operators
 
-VVA is highly specialized for maximum execution speed, meaning it focuses on core operators out of the box. If your custom model architecture (such as Real-ESRGAN or SwinIR) utilizes specialized layers, configure them in the C++ core:
+| Operator | Status |
+|---|---|
+| `Conv2D` | Built in |
+| `PixelShuffle` | Built in |
+| `LeakyReLU` | Built in |
+| Attention blocks, `InstanceNorm`, other layers | Need a custom implementation (see below) |
 
-1. **Add Custom Operators:** The core natively supports `Conv2D`, `PixelShuffle`, and `LeakyReLU`. For architectural variants containing Attention Blocks or InstanceNorm, implement the corresponding Vulkan Compute Shaders (`.comp`) or NNAPI bindings.
-2. **Graph Execution Flow:** Update the sequential logic inside `core/src/graph.h` to link operators and tensors according to your specific network topology.
+## Customization and further development
+
+VVA is specialized for maximum execution speed, so it focuses on core operators out of the box. If your model architecture (such as Real-ESRGAN or SwinIR) uses specialized layers, configure them in the C++ core:
+
+1. **Add custom operators.** For variants containing attention blocks or InstanceNorm, implement the corresponding Vulkan compute shaders (`.comp`) or NNAPI bindings.
+2. **Update the graph execution flow.** Edit the sequential logic in `core/src/graph.h` to link operators and tensors according to your network topology.
+
+## License
+
+BSD 3-Clause — see [LICENSE](LICENSE).
