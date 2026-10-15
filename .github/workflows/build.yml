@@ -16,16 +16,13 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
           
-      - name: Download and Install Gradle
-        run: |
-          wget https://services.gradle.org/distributions/gradle-8.4-bin.zip
-          unzip -q gradle-8.4-bin.zip
-          echo "$PWD/gradle-8.4/bin" >> $GITHUB_PATH
+      - name: Make gradlew executable
+        run: chmod +x gradlew
           
       - name: Build with Gradle
-        run: gradle :vva-android:assembleRelease --no-daemon
+        run: ./gradlew :android:assembleRelease --no-daemon
         
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
         with:
-          files: vva-android/build/outputs/aar/vva-android-release.aar
+          files: android/build/outputs/aar/android-release.aar
