@@ -1,11 +1,7 @@
 #include "vva/vva.h"
+
 #include "model_loader.cpp"
 #include "backend/vulkan_context.cpp"
-#include "backend/vulkan_dispatcher.cpp"
-#include "backend/vulkan_zero_copy.cpp"
-#include "backend/nnapi_backend.cpp"
-#include "scheduler.cpp"
-#include "graph.h"
 
 namespace vva {
 
@@ -13,47 +9,35 @@ class Engine::Impl {
 public:
     ModelLoader loader;
     VulkanContext vkContext;
-    VulkanZeroCopyManager vkZeroCopy;
-    VulkanDispatcher vkDispatcher;
-    NNAPIBackend nnapi;
-    Scheduler scheduler;
-    Graph graph;
+    bool modelLoaded = false;
 
-    Impl() {
-        vkContext.init();
-        nnapi.initModel();
-    }
+    Impl() { vkContext.init(); }
 
     bool load(const std::string& path) {
-        if (!loader.loadVVA(path)) return false;
-        graph.buildExecutionOrder();
-        return true;
-    }
-
-    bool process(const uint8_t* inRGBA, int w, int h, uint8_t* outRGBA, DeviceType device) {
-        scheduler.dispatchTile(inRGBA, outRGBA, w, h);
-        
-        if (device == DeviceType::GPU_VULKAN || device == DeviceType::AUTO) {
-            vkDispatcher.submitQueue(vkContext.computeQueue);
-        }
-        
-        if (device == DeviceType::NPU_NNAPI || device == DeviceType::AUTO) {
-            nnapi.compileAndExecute();
-        }
-
-        return true;
+        modelLoaded = loader.loadVVA(path);
+        return modelLoaded;
     }
 };
 
 Engine::Engine() : pimpl(new Impl()) {}
-Engine::~Engine() {}
+Engine::~Engine() = default;
 
 bool Engine::loadModel(const std::string& modelPath) {
     return pimpl->load(modelPath);
 }
 
-bool Engine::processImageTile(const uint8_t* inRGBA, int w, int h, uint8_t* outRGBA, DeviceType device) {
-    return pimpl->process(inRGBA, w, h, outRGBA, device);
+bool Engine::processImageTile(const uint8_t*, int, int, uint8_t*, DeviceType) {
+    // The graph executor is not implemented yet. Return false instead of
+    // running half-built pipelines.
+    return false;
 }
 
+bool Engine::hasVulkan() const {
+    return pimpl->vkContext.ready();
 }
+
+std::string Engine::vulkanDeviceName() const {
+    return pimpl->vkContext.deviceName;
+}
+
+}  // namespace vva
