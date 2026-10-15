@@ -1,0 +1,12 @@
+plugins {
+    id 'com.android.library' // บรรทัดนี้สำคัญสุด เป็นตัวสั่งให้บิวด์ออกมาเป็นไฟล์ .aar
+}
+
+android {
+    namespace 'com.example.vva' // เปลี่ยนเป็นชื่อแพ็กเกจไลบรารีของคุณ
+    compileSdk 34
+
+    defaultConfig {
+        minSdk 24 // หรือเวอร์ชันต่ำสุดที่คุณต้องการรองรับ
+    }
+}
