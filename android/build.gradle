@@ -2,7 +2,6 @@ plugins {
     id 'com.android.library' version '8.1.0'
 }
 
-// 1. เพิ่มบล็อกนี้เพื่อให้โปรเจกต์รู้แหล่งดาวน์โหลดเครื่องมือเสริม (เช่น AAPT2)
 repositories {
     google()
     mavenCentral()
@@ -10,7 +9,7 @@ repositories {
 
 android {
     namespace 'com.example.vva' 
-    compileSdk 33 // 2. ปรับลงมาเป็น 33 เพื่อให้ตรงกับเวอร์ชันที่ปลั๊กอินรองรับ 100%
+    compileSdk 33
 
     defaultConfig {
         minSdk 24
