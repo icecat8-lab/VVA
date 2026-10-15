@@ -3,6 +3,7 @@ name: Build AAR
 on:
   release:
     types: [published]
+  workflow_dispatch: # เพิ่มบรรทัดนี้ เพื่อให้กดรันเองได้
 
 jobs:
   build:
@@ -16,17 +17,20 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
           
-      # ใช้ Action ของ Gradle อย่างเป็นทางการ โหลดและติดตั้งให้แบบอัตโนมัติ
+      # ใช้ Action ของ Gradle
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@v4 # แนะนำให้ใช้ v4 ซึ่งเป็นเวอร์ชันล่าสุด
         with:
           gradle-version: '8.4'
           
-      # สั่งรันคำสั่ง gradle ตรงๆ โดยไม่ต้องพึ่งไฟล์ ./gradlew
+      # รันคำสั่ง gradle ตรงๆ เปลี่ยนเป็น :android ตามชื่อโฟลเดอร์จริง
       - name: Build with Gradle
         run: gradle :android:assembleRelease --no-daemon
         
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
+        # ถ้าคุณรันแบบ Manual มันอาจจะไม่มี Release ให้อัปโหลด ให้ระวังตรงนี้นะครับ
+        # อาจจะต้องเพิ่มเงื่อนไข if: github.event_name == 'release' เข้าไป 
+        # หรือถ้าแค่จะทดสอบให้บิวด์ผ่าน ลองคอมเมนต์ส่วน Upload ไปก่อนก็ได้ครับ
         with:
           files: android/build/outputs/aar/android-release.aar
