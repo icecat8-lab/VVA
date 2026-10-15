@@ -1,12 +1,12 @@
 plugins {
-    id 'com.android.library' // บรรทัดนี้สำคัญสุด เป็นตัวสั่งให้บิวด์ออกมาเป็นไฟล์ .aar
+    id 'com.android.library' version '8.1.0'
 }
 
 android {
-    namespace 'com.example.vva' // เปลี่ยนเป็นชื่อแพ็กเกจไลบรารีของคุณ
+    namespace 'com.example.vva' // ถ้ามีชื่อ package จริงๆ ของโค้ด C++/Java ให้เปลี่ยนตรงนี้ให้ตรงกันครับ
     compileSdk 34
 
     defaultConfig {
-        minSdk 24 // หรือเวอร์ชันต่ำสุดที่คุณต้องการรองรับ
+        minSdk 24
     }
 }
