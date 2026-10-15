@@ -3,34 +3,31 @@ name: Build AAR
 on:
   release:
     types: [published]
-  workflow_dispatch: # เพิ่มบรรทัดนี้ เพื่อให้กดรันเองได้
+  workflow_dispatch: # ทำให้กดปุ่มรันเองจากหน้าเว็บได้
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
       
-      - name: set up JDK 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
           
-      # ใช้ Action ของ Gradle
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4 # แนะนำให้ใช้ v4 ซึ่งเป็นเวอร์ชันล่าสุด
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.4'
           
-      # รันคำสั่ง gradle ตรงๆ เปลี่ยนเป็น :android ตามชื่อโฟลเดอร์จริง
       - name: Build with Gradle
         run: gradle :android:assembleRelease --no-daemon
         
-      - name: Upload Release Asset
-        uses: softprops/action-gh-release@v2
-        # ถ้าคุณรันแบบ Manual มันอาจจะไม่มี Release ให้อัปโหลด ให้ระวังตรงนี้นะครับ
-        # อาจจะต้องเพิ่มเงื่อนไข if: github.event_name == 'release' เข้าไป 
-        # หรือถ้าแค่จะทดสอบให้บิวด์ผ่าน ลองคอมเมนต์ส่วน Upload ไปก่อนก็ได้ครับ
+      - name: Upload AAR Artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: android/build/outputs/aar/android-release.aar
+          name: vva-android-aar
+          path: android/build/outputs/aar/android-release.aar
