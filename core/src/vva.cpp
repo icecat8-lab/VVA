@@ -1,21 +1,30 @@
 #include "vva/vva.h"
 
-#include "model_loader.cpp"
+#include <utility>
+
+#include "model.h"
 #include "backend/vulkan_context.cpp"
 
 namespace vva {
 
 class Engine::Impl {
 public:
-    ModelLoader loader;
+    std::unique_ptr<Model> model;
+    std::string lastError;
     VulkanContext vkContext;
-    bool modelLoaded = false;
 
     Impl() { vkContext.init(); }
 
     bool load(const std::string& path) {
-        modelLoaded = loader.loadVVA(path);
-        return modelLoaded;
+        std::string error;
+        std::unique_ptr<Model> loaded = Model::load(path, &error);
+        if (!loaded) {
+            lastError = error;
+            return false;
+        }
+        model = std::move(loaded);
+        lastError.clear();
+        return true;
     }
 };
 
@@ -24,6 +33,10 @@ Engine::~Engine() = default;
 
 bool Engine::loadModel(const std::string& modelPath) {
     return pimpl->load(modelPath);
+}
+
+std::string Engine::lastError() const {
+    return pimpl->lastError;
 }
 
 bool Engine::processImageTile(const uint8_t*, int, int, uint8_t*, DeviceType) {
