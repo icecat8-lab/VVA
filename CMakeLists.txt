@@ -17,7 +17,7 @@ if(VVA_BUILD_JNI)
 endif()
 
 if(VVA_BUILD_SHARED)
-    add_library(vva SHARED core/src/vva.cpp)
+    add_library(vva SHARED ${VVA_CORE_SOURCES})
     target_include_directories(vva PUBLIC core/include PRIVATE core/src)
     target_link_libraries(vva PUBLIC vulkan android log)
 endif()
