@@ -1,13 +1,11 @@
-sett(VVA_CORE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+set(VVA_CORE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(VVA_CORE_SOURCES
     ${VVA_CORE_DIR}/src/vva.cpp
     ${VVA_CORE_DIR}/src/model.cpp
     ${VVA_CORE_DIR}/src/exec.cpp)
 set(VVA_CORE_SOURCES ${VVA_CORE_SOURCES} PARENT_SCOPE)
 
-
 function(vva_configure target)
-
     set(core_dir ${CMAKE_CURRENT_FUNCTION_LIST_DIR})
     target_include_directories(${target} PUBLIC ${core_dir}/include PRIVATE ${core_dir}/src)
     target_compile_features(${target} PUBLIC cxx_std_17)
