@@ -10,7 +10,6 @@ option(VVA_BUILD_SHARED "Build libvva.so" OFF)
 option(VVA_BUILD_CLI "Build the vva-cli executable" OFF)
 
 
-if(ANDROID)
     set(_vva_vulkan_default ON)
 else()
     set(_vva_vulkan_default OFF)
@@ -18,6 +17,8 @@ endif()
 option(VVA_ENABLE_VULKAN "Link Vulkan for the diagnostic probe" ${_vva_vulkan_default})
 
 
+find_package(Threads REQUIRED)
+add_subdirectory(core)
 
 
 set(VVA_PAGE_ALIGN_FLAGS "-Wl,-z,max-page-size=16384")
