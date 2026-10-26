@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22.1)
-project(VVA VERSION 0.1.0 LANGUAGES C CXX)
+project(VVA VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,21 +9,36 @@ option(VVA_BUILD_JNI "Build the Android JNI library (used by Gradle)" OFF)
 option(VVA_BUILD_SHARED "Build libvva.so" OFF)
 option(VVA_BUILD_CLI "Build the vva-cli executable" OFF)
 
+# Vulkan is only probed for diagnostics (vva-cli --info); processing runs on the CPU.
+if(ANDROID)
+    set(_vva_vulkan_default ON)
+else()
+    set(_vva_vulkan_default OFF)
+endif()
+option(VVA_ENABLE_VULKAN "Link Vulkan for the diagnostic probe" ${_vva_vulkan_default})
+
 add_subdirectory(core)
+
+# Android 15+ devices may use 16 KB pages: align shared libraries accordingly.
+set(VVA_PAGE_ALIGN_FLAGS "-Wl,-z,max-page-size=16384")
 
 if(VVA_BUILD_JNI)
     add_library(vva_engine SHARED android/vva-android/src/main/cpp/vva_jni.cpp)
-    target_link_libraries(vva_engine PRIVATE vva_core android log)
+    target_link_libraries(vva_engine PRIVATE vva_core jnigraphics android log)
+    target_link_options(vva_engine PRIVATE ${VVA_PAGE_ALIGN_FLAGS})
 endif()
 
 if(VVA_BUILD_SHARED)
     add_library(vva SHARED ${VVA_CORE_SOURCES})
-    target_include_directories(vva PUBLIC core/include PRIVATE core/src)
-    target_link_libraries(vva PUBLIC vulkan android log)
+    vva_configure(vva)
+    target_link_options(vva PRIVATE ${VVA_PAGE_ALIGN_FLAGS})
 endif()
 
 if(VVA_BUILD_CLI)
     add_executable(vva-cli cli/main.cpp)
     target_link_libraries(vva-cli PRIVATE vva_core)
     target_compile_definitions(vva-cli PRIVATE VVA_VERSION="${PROJECT_VERSION}")
+    if(ANDROID)
+        target_link_options(vva-cli PRIVATE ${VVA_PAGE_ALIGN_FLAGS})
+    endif()
 endif()

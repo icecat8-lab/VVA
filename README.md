@@ -1,132 +1,135 @@
-# VVA Framework (Visual Processing Architecture)
+# VVA
 
-An AI inference engine built for **super-resolution and image-to-image tasks on Android**.
+A small super-resolution inference engine for Android. It runs `.vva` models
+(a compact, checksummed model format with the graph included) on the phone's CPU,
+tiles large images so memory stays bounded, and ships as an AAR for apps plus a
+command-line tool.
 
-VVA targets the bottlenecks of general-purpose AI frameworks: execution speed, memory use, and visual fidelity when processing large images on mobile hardware.
+* Runs the x4 **RRDBNet** of basicsr / Real-ESRGAN (and models trained with that code).
+* **CPU only**, multi-threaded, float32 maths with fp16 weights on disk. No Vulkan or NNAPI
+  is needed to process an image (Vulkan is only probed by `vva-cli --info`).
+* Android 8.0+ (API 26), arm64-v8a. A 16 KB-page-aligned `libvva_engine.so`, no `libc++_shared.so`.
+* Progress callback, cancellation, alpha channel, `Bitmap` and `HardwareBuffer` input/output.
 
-## Key Features
+> **Speed.** Every convolution runs on CPU cores, so heavy models (for example 23 RRDB
+> blocks) are much slower than a GPU engine such as ncnn with Vulkan. Small and medium
+> models are fine. Measure on your target phone; the memory budget and thread count are
+> adjustable. A GPU backend is not included (see `experimental/README.md`).
 
-- **Zero-copy memory pipeline** — images are passed straight to the GPU/NPU through Android's `AHardwareBuffer`, avoiding CPU-to-GPU copies. This lowers memory pressure and helps when processing large, high-resolution images.
-- **Mixed precision (FP16 + FP32)** — main model weights are stored as FP16 for fast loading and execution, while precision-sensitive layers (such as LayerNorm or output layers) stay in FP32 to preserve color accuracy.
-- **NPU + Vulkan** — heavy tensor computation is offloaded to the NPU through Android NNAPI, while Vulkan compute shaders handle spatial upscaling and pixel manipulation.
-
-## How it works
-
-```
-PyTorch checkpoint (.pth)
-        │  vva-convert
-        ▼
-my_upscaler.vva  +  my_upscaler.json
-        │  VVAEngine.init()
-        ▼
-HardwareBuffer (input) ──► VVAEngine.processZeroCopy() ──► HardwareBuffer (output)
-```
-
-## Requirements
-
-- **Converter:** Python 3 on a PC, Google Colab, or Termux.
-- **Android:** the APIs VVA builds on set the minimum versions: `HardwareBuffer` needs Android 8.0 (API 26)+, NNAPI needs Android 8.1 (API 27)+, and Vulkan compute needs a Vulkan-capable GPU.
-
-## Quick start
-
-1. **Install** the converter (see [Installation](#1-installation)).
-2. **Convert** your `.pth` checkpoint to `.vva` (see [Converting a model](#2-converting-a-model)).
-3. **Add** the `core/` and `android/` modules to your Android project and call `VVAEngine` (see [Android integration](#3-android-integration)).
-
-## Project structure
-
-| Folder | Contents |
-|---|---|
-| `python/` | Toolkit for converting PyTorch models into the `.vva` format |
-| `core/` | C++ execution core (engine, memory mapping, shaders, task scheduler) |
-| `android/` | Android library module (`.aar` / `.so`) and sample project |
-
----
-
-## 1. Installation
-
-The conversion toolkit is lightweight and runs on a standard PC, Google Colab, or mobile environments such as Termux.
+## 1. Convert a model
 
 ```bash
-git clone https://github.com/icecat8-lab/VVA.git
-cd VVA/python
-pip install -e .
+pip install ./python            # numpy only
+pip install torch               # only needed to read .pth files
+vva-convert -i model.pth -o model.vva --name "my-model"
 ```
 
-## 2. Converting a model
+* Input: a `.pth` / `.pt` checkpoint (`params_ema`, `params` and `state_dict` wrappers and a
+  `module.` prefix are handled) or a plain `.npz` of weights.
+* `.pth` files are loaded with `weights_only=True` (PyTorch 1.13+); add `--allow-pickle` only for files you trust.
+* After writing, the converter re-reads the file and checks the stored graph against the original
+  network on a random image; it prints the numerical error and fails if they disagree.
+* Options: `--fp32` (no fp16 rounding), `--lrelu-slope`, `--res-scale` (defaults 0.2, as in basicsr),
+  `--no-verify`.
+* Not supported (reported with a clear error): models with pixel-unshuffle (x2 / x1 variants),
+  other architectures. The `.vva` is self-contained; there is no `.json` sidecar any more.
 
-Prepare your PyTorch checkpoint (`.pth`) and run:
+## 2. Use it in an app
 
-```bash
-vva-convert --input /path/to/my_upscaler.pth --output /path/to/my_upscaler.vva
-```
-
-The tool inspects the layer topology and compiles the binary. It also writes a paired `.json` metadata file next to the `.vva` file for parsing in native code — keep both files together.
-
-## 3. Android integration
-
-### Add the module
-
-In `settings.gradle`:
-
-```gradle
-include ':app', ':vva-android'
-```
-
-In your app module's `build.gradle`:
+Download `vva-android-<tag>.aar` from the GitHub release, put it in `app/libs/` and add:
 
 ```gradle
 dependencies {
-    implementation project(':vva-android')
+    implementation files('libs/vva-android-v1.0.0.aar')
 }
 ```
 
-### Use it (Java)
-
-Put the converted `.vva` file in your device storage or project assets, then initialize the engine and process images through the zero-copy pipeline:
+Copy the model out of `assets/` once (the engine memory-maps a real file), then:
 
 ```java
-import com.vva.engine.VVAEngine;
-import android.hardware.HardwareBuffer;
+File model = new File(getFilesDir(), "model.vva");
+if (!model.exists()) {
+    try (InputStream in = getAssets().open("model.vva");
+         OutputStream out = new FileOutputStream(model)) {
+        byte[] buf = new byte[1 << 16];
+        for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+    }
+}
 
-// 1. Initialize the engine and load the converted .vva model
-VVAEngine engine = new VVAEngine();
-engine.init("/path/to/my_upscaler.vva");
-
-// 2. Process an image through the zero-copy pipeline
-//    (inputBuffer and outputBuffer must both be Android HardwareBuffers)
-engine.processZeroCopy(inputBuffer, outputBuffer);
+// On a background thread:
+try (VVAEngine engine = new VVAEngine()) {
+    if (!engine.init(model.getAbsolutePath())) {
+        Log.e("VVA", engine.getLastError());
+        return;
+    }
+    engine.setMemoryBudgetMb(256);                  // optional, default 320
+    Bitmap big = engine.upscale(photo, fraction -> {
+        runOnUiThread(() -> progressBar.setProgress((int) (fraction * 100)));
+        return !userCancelled;                       // return false to cancel
+    });
+    if (big == null) Log.e("VVA", engine.getLastError());
+}
 ```
 
-### Use it (Kotlin)
+Keep one `VVAEngine` for the lifetime of the screen instead of creating one per image.
+`engine.cancel()` can be called from any thread. Other entry points:
+`processBitmap(in, out, listener)` for your own output bitmap and
+`processZeroCopy(HardwareBuffer in, HardwareBuffer out)` (CPU access to the buffers,
+RGBA_8888, allocate with `USAGE_CPU_READ_OFTEN` / `USAGE_CPU_WRITE_OFTEN`).
 
-```kotlin
-import android.hardware.HardwareBuffer
-import com.vva.engine.VVAEngine
+Notes
 
-val engine = VVAEngine()
-engine.init("/path/to/my_upscaler.vva")
-engine.processZeroCopy(inputBuffer, outputBuffer)
+* Call `init`/`upscale` from a worker thread; both block.
+* Tile size is chosen automatically from the memory budget. For a 12 MP photo the image is
+  processed in tiles and the result is written straight into the output bitmap.
+  `setTilePad` (default 16) is the overlap used to hide tile borders.
+* R8 / ProGuard rules are included in the AAR.
+
+## 3. Command line (Termux, adb shell, Linux)
+
+```bash
+vva-cli info model.vva                                  # check a model
+vva-cli run model.vva in.ppm out.ppm --threads 4        # upscale a P6 PPM image
+vva-cli --info                                          # Vulkan diagnostics
 ```
 
----
+PPM is used so the tool needs no image libraries; convert with `ffmpeg -i in.png in.ppm`.
 
-## Supported operators
+## Building
 
-| Operator | Status |
-|---|---|
-| `Conv2D` | Built in |
-| `PixelShuffle` | Built in |
-| `LeakyReLU` | Built in |
-| Attention blocks, `InstanceNorm`, other layers | Need a custom implementation (see below) |
+GitHub Actions (`Build VVA`, manual trigger) runs all tests, builds the AAR, `libvva.so` and
+`vva-cli` for arm64-v8a and attaches them to a release. Locally:
 
-## Customization and further development
+```bash
+gradle :vva-android:assembleRelease                      # needs JDK 17, Android SDK + NDK 26.3
+python3 tests/test_format.py && python3 tests/test_converter.py && \
+python3 tests/test_engine.py && python3 tests/check_jni.py   # host tests (g++, numpy)
+```
 
-VVA is specialized for maximum execution speed, so it focuses on core operators out of the box. If your model architecture (such as Real-ESRGAN or SwinIR) uses specialized layers, configure them in the C++ core:
+## What is tested
 
-1. **Add custom operators.** For variants containing attention blocks or InstanceNorm, implement the corresponding Vulkan compute shaders (`.comp`) or NNAPI bindings.
-2. **Update the graph execution flow.** Edit the sequential logic in `core/src/graph.h` to link operators and tensors according to your network topology.
+The host tests build the real C++ sources with AddressSanitizer + UBSan and compare against an
+independent numpy implementation: RRDBNet outputs for odd image sizes and channel counts
+(exercising every kernel remainder), every operator and convolution variant, fp16 conversion of
+all special values, thread-count independence (bit-identical), tiling vs whole image, progress,
+cancellation, alpha, memory-budget tiling, corrupted and hostile model files, the converter and
+its error paths, and the JNI pixel handling (strides, premultiplied alpha). `check_jni.py` verifies
+that the Java `native` declarations match the C++ functions.
 
-## License
+Not testable off-device and therefore **not verified here**: the Android build itself
+(NDK / Gradle / AAR packaging), JNI calls into a real `Bitmap` / `HardwareBuffer`, and speed on a
+phone. Run the app once on a device before shipping.
 
-BSD 3-Clause — see [LICENSE](LICENSE).
+## Layout
+
+```
+core/            model reader (model.cpp), CPU executor (exec.cpp), engine (vva.cpp)
+android/         Gradle module + JNI (vva_jni.cpp) + Java API (VVAEngine.java)
+cli/             vva-cli
+python/          vva-convert, the .vva writer/reader, numpy reference implementation
+docs/FORMAT.md   the .vva format
+tests/           host tests
+experimental/    unfinished GPU / NPU code (not built)
+```
+
+License: see `LICENSE`.

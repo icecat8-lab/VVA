@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version_tag:
-        description: 'Release tag (e.g. v0.1.0)'
+        description: 'Release tag (e.g. v1.0.0)'
         required: true
-        default: 'v0.1.0'
+        default: 'v1.0.0'
 
 permissions:
   contents: write
@@ -22,11 +22,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Format tests (host, with sanitizers)
+      - name: Host tests (real sources, ASan + UBSan, numpy reference)
         run: |
           python3 -m venv /tmp/venv
           /tmp/venv/bin/pip install --quiet numpy
           /tmp/venv/bin/python tests/test_format.py
+          /tmp/venv/bin/python tests/test_converter.py
+          /tmp/venv/bin/python tests/test_engine.py
+          /tmp/venv/bin/python tests/check_jni.py
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -60,22 +63,6 @@ jobs:
             -DVVA_BUILD_SHARED=ON \
             -DVVA_BUILD_CLI=ON
           cmake --build build-native --parallel
-
-      - name: Compile shaders (informational, not used by the build yet)
-        continue-on-error: true
-        run: |
-          GLSLC="$NDK/shader-tools/linux-x86_64/glslc"
-          mkdir -p build-shaders
-          FAILED=0
-          for f in core/src/shaders/*.comp; do
-            if "$GLSLC" -O "$f" -o "build-shaders/$(basename "$f").spv"; then
-              echo "OK   $f"
-            else
-              echo "FAIL $f"
-              FAILED=1
-            fi
-          done
-          exit $FAILED
 
       - name: Collect release files
         run: |

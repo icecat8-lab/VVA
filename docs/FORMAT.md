@@ -93,6 +93,35 @@ v2 core set.
 | `ResizeNearest` | `x` | `scale [sh, sw]` (integers; nearest-neighbour like `torch.nn.functional.interpolate(mode="nearest")`) |
 | `PixelShuffle` | `x` | `upscale` (integer) |
 
+## What the VVA engine executes
+
+`Engine::loadModel()` runs the CPU executor's checks, so an unsupported file is
+rejected when it is loaded (with the reason), not in the middle of a job. A model
+runs when:
+
+- it has exactly one input and one output, laid out NCHW with batch 1, a fixed
+  channel count and dynamic height and width, e.g. `[1, 3, -1, -1]`;
+- the engine entry point (`processImageTile`) additionally needs 3 input and 3
+  output channels (RGB, values in 0..1);
+- every operator is in the core set above; constants are only accepted as the
+  `weight` / `bias` inputs of `Conv2D`, all other operands must be activations;
+- `Concat` joins along the channel axis (`axis` 1);
+- the output is an exact integer multiple of the input size, the same for height
+  and width (this is what makes tiling possible) and equals `meta.scale` when that
+  is declared. Valid (unpadded) convolutions that shrink the image are therefore
+  not supported.
+
+Weights stored as `f16` are converted to float32 when the model is loaded; all
+arithmetic is float32.
+
+## Models produced by `vva-convert`
+
+`vva-convert` writes the x4 `RRDBNet` of basicsr / Real-ESRGAN completely:
+`conv_first`, `body.N.rdb{1,2,3}.conv{1..5}` (dense blocks with `Concat`, `LeakyReLU`
+and the `Mul` + `Add` residual scaling), `conv_body`, two `ResizeNearest` + `Conv2D`
++ `LeakyReLU` upsampling stages, `conv_hr` and `conv_last`. Weights are `f16`,
+biases `f32`. The graph needs no side files.
+
 ## Versioning
 
 A reader that supports version 2 must reject any other `version`, any non-zero
