@@ -120,16 +120,5 @@ Not testable off-device and therefore **not verified here**: the Android build i
 (NDK / Gradle / AAR packaging), JNI calls into a real `Bitmap` / `HardwareBuffer`, and speed on a
 phone. Run the app once on a device before shipping.
 
-## Layout
-
-```
-core/            model reader (model.cpp), CPU executor (exec.cpp), engine (vva.cpp)
-android/         Gradle module + JNI (vva_jni.cpp) + Java API (VVAEngine.java)
-cli/             vva-cli
-python/          vva-convert, the .vva writer/reader, numpy reference implementation
-docs/FORMAT.md   the .vva format
-tests/           host tests
-experimental/    unfinished GPU / NPU code (not built)
-```
 
 License: see `LICENSE`.
