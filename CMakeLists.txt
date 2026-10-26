@@ -9,7 +9,7 @@ option(VVA_BUILD_JNI "Build the Android JNI library (used by Gradle)" OFF)
 option(VVA_BUILD_SHARED "Build libvva.so" OFF)
 option(VVA_BUILD_CLI "Build the vva-cli executable" OFF)
 
-# Vulkan is only probed for diagnostics (vva-cli --info); processing runs on the CPU.
+
 if(ANDROID)
     set(_vva_vulkan_default ON)
 else()
@@ -17,9 +17,9 @@ else()
 endif()
 option(VVA_ENABLE_VULKAN "Link Vulkan for the diagnostic probe" ${_vva_vulkan_default})
 
-add_subdirectory(core)
 
-# Android 15+ devices may use 16 KB pages: align shared libraries accordingly.
+
+
 set(VVA_PAGE_ALIGN_FLAGS "-Wl,-z,max-page-size=16384")
 
 if(VVA_BUILD_JNI)
