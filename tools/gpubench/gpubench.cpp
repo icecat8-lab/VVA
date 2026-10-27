@@ -1,7 +1,10 @@
-// vva-gpubench: measures a 3x3 convolution on the GPU (Vulkan compute, fp32) and checks
-// it against a CPU reference. It tells whether a GPU backend is worth building.
+// vva-gpubench: compares several 3x3 convolution kernels on the GPU (Vulkan compute) and checks
+// each one against a CPU reference before reporting its speed.
 //
-//   vva-gpubench conv3x3.spv
+//   vva-gpubench <directory containing the .spv files>
+//
+// Kernels: baseline fp32, register-tiled fp32 (padded input, 4 pixels x 8 channels per thread) and
+// the same tiled kernel in fp16 (only when the device supports it).
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -16,6 +19,13 @@
 
 namespace {
 
+struct Dev {
+    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+    VkDevice device = VK_NULL_HANDLE;
+    VkQueue computeQueue = VK_NULL_HANDLE;
+    uint32_t queueFamilyIndex = 0;
+};
+
 struct Buffer {
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -26,10 +36,87 @@ struct Config {
     int cin, cout, h, w;
 };
 
+struct Variant {
+    const char* label;
+    const char* file;
+    bool padded;  // input planes carry a one-pixel zero border
+    bool half;    // fp16 storage and arithmetic
+    int px;       // output pixels per invocation along x
+    int wgx, wgy; // local workgroup size
+};
+
+struct Result {
+    bool ran = false;
+    bool correct = false;
+    double gflops = 0.0;
+    double ms = 0.0;
+    double err = 0.0;
+};
+
+enum Status { kOk = 0, kVulkanError = 1, kFatal = 2 };
+
+const Variant kVariants[] = {
+    {"baseline fp32", "conv3x3.spv", false, false, 1, 8, 8},
+    {"tiled fp32", "conv3x3_t4.spv", true, false, 4, 16, 4},
+    {"tiled fp16", "conv3x3_t4_f16.spv", true, true, 4, 16, 4},
+};
+
 bool check(VkResult r, const char* what) {
     if (r == VK_SUCCESS) return true;
-    std::printf("Vulkan error %d in %s\n", static_cast<int>(r), what);
+    std::printf("  Vulkan error %d in %s\n", static_cast<int>(r), what);
     return false;
+}
+
+uint16_t floatToHalf(float f) {
+    uint32_t x;
+    std::memcpy(&x, &f, sizeof(x));
+    const uint32_t sign = (x >> 16) & 0x8000u;
+    const uint32_t expBits = (x >> 23) & 0xFFu;
+    const uint32_t man = x & 0x7FFFFFu;
+    if (expBits == 0xFFu) return static_cast<uint16_t>(sign | 0x7C00u | (man ? 0x200u : 0u));
+    const int32_t exp = static_cast<int32_t>(expBits) - 127 + 15;
+    if (exp >= 31) return static_cast<uint16_t>(sign | 0x7C00u);
+    if (exp <= 0) {
+        if (exp < -10) return static_cast<uint16_t>(sign);
+        const uint32_t m = man | 0x800000u;
+        const uint32_t shift = static_cast<uint32_t>(14 - exp);
+        uint32_t half = m >> shift;
+        const uint32_t rem = m & ((1u << shift) - 1u);
+        const uint32_t mid = 1u << (shift - 1u);
+        if (rem > mid || (rem == mid && (half & 1u))) ++half;
+        return static_cast<uint16_t>(sign | half);
+    }
+    uint32_t half = (static_cast<uint32_t>(exp) << 10) | (man >> 13);
+    const uint32_t rem = man & 0x1FFFu;
+    if (rem > 0x1000u || (rem == 0x1000u && (half & 1u))) ++half;
+    return static_cast<uint16_t>(sign | half);
+}
+
+float halfToFloat(uint16_t h) {
+    const uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
+    const uint32_t exp = (h >> 10) & 0x1Fu;
+    uint32_t man = h & 0x3FFu;
+    uint32_t bits;
+    if (exp == 0) {
+        if (man == 0) {
+            bits = sign;
+        } else {
+            int e = -1;
+            do {
+                ++e;
+                man <<= 1;
+            } while ((man & 0x400u) == 0);
+            man &= 0x3FFu;
+            bits = sign | (static_cast<uint32_t>(127 - 15 - e) << 23) | (man << 13);
+        }
+    } else if (exp == 31) {
+        bits = sign | 0x7F800000u | (man << 13);
+    } else {
+        bits = sign | ((exp + 112u) << 23) | (man << 13);
+    }
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
 }
 
 bool findMemoryType(VkPhysicalDevice pd, uint32_t bits, VkMemoryPropertyFlags want, uint32_t& index) {
@@ -44,7 +131,7 @@ bool findMemoryType(VkPhysicalDevice pd, uint32_t bits, VkMemoryPropertyFlags wa
     return false;
 }
 
-bool createBuffer(const vva::VulkanContext& c, size_t size, Buffer& b) {
+bool createBuffer(const Dev& c, size_t size, Buffer& b) {
     VkBufferCreateInfo bi{};
     bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bi.size = size;
@@ -57,7 +144,7 @@ bool createBuffer(const vva::VulkanContext& c, size_t size, Buffer& b) {
     uint32_t type = 0;
     const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     if (!findMemoryType(c.physicalDevice, req.memoryTypeBits, want, type)) {
-        std::printf("no host-visible coherent memory type\n");
+        std::printf("  no host-visible coherent memory type\n");
         return false;
     }
     VkMemoryAllocateInfo ai{};
@@ -69,15 +156,15 @@ bool createBuffer(const vva::VulkanContext& c, size_t size, Buffer& b) {
     return check(vkMapMemory(c.device, b.memory, 0, VK_WHOLE_SIZE, 0, &b.mapped), "vkMapMemory");
 }
 
-void destroyBuffer(const vva::VulkanContext& c, Buffer& b) {
+void destroyBuffer(const Dev& c, Buffer& b) {
     if (b.mapped) vkUnmapMemory(c.device, b.memory);
     if (b.buffer != VK_NULL_HANDLE) vkDestroyBuffer(c.device, b.buffer, nullptr);
     if (b.memory != VK_NULL_HANDLE) vkFreeMemory(c.device, b.memory, nullptr);
     b = Buffer();
 }
 
-bool loadSpirv(const char* path, std::vector<uint32_t>& code) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+bool loadSpirv(const std::string& path, std::vector<uint32_t>& code) {
+    std::ifstream f(path.c_str(), std::ios::binary | std::ios::ate);
     if (!f) return false;
     const std::streamsize size = f.tellg();
     if (size <= 0 || size % 4 != 0) return false;
@@ -97,7 +184,7 @@ struct Pipeline {
     VkFence fence = VK_NULL_HANDLE;
 };
 
-bool createPipeline(const vva::VulkanContext& c, const std::vector<uint32_t>& code, int maxSets, Pipeline& p) {
+bool createPipeline(const Dev& c, const std::vector<uint32_t>& code, Pipeline& p) {
     VkShaderModuleCreateInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     si.codeSize = code.size() * sizeof(uint32_t);
@@ -140,10 +227,10 @@ bool createPipeline(const vva::VulkanContext& c, const std::vector<uint32_t>& co
 
     VkDescriptorPoolSize ps{};
     ps.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    ps.descriptorCount = static_cast<uint32_t>(3 * maxSets);
+    ps.descriptorCount = 3;
     VkDescriptorPoolCreateInfo dp{};
     dp.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dp.maxSets = static_cast<uint32_t>(maxSets);
+    dp.maxSets = 1;
     dp.poolSizeCount = 1;
     dp.pPoolSizes = &ps;
     if (!check(vkCreateDescriptorPool(c.device, &dp, nullptr, &p.pool), "vkCreateDescriptorPool")) return false;
@@ -158,7 +245,7 @@ bool createPipeline(const vva::VulkanContext& c, const std::vector<uint32_t>& co
     return check(vkCreateFence(c.device, &fi, nullptr, &p.fence), "vkCreateFence");
 }
 
-void destroyPipeline(const vva::VulkanContext& c, Pipeline& p) {
+void destroyPipeline(const Dev& c, Pipeline& p) {
     if (p.fence != VK_NULL_HANDLE) vkDestroyFence(c.device, p.fence, nullptr);
     if (p.cmdPool != VK_NULL_HANDLE) vkDestroyCommandPool(c.device, p.cmdPool, nullptr);
     if (p.pool != VK_NULL_HANDLE) vkDestroyDescriptorPool(c.device, p.pool, nullptr);
@@ -169,50 +256,108 @@ void destroyPipeline(const vva::VulkanContext& c, Pipeline& p) {
     p = Pipeline();
 }
 
-// Returns false on a Vulkan error. `gflops` is the measured rate; `correct` tells whether the output matched.
-bool runConfig(const vva::VulkanContext& c, Pipeline& p, const Config& cfg, double& gflops, double& msPerDispatch,
-               bool& correct) {
+// A second logical device with fp16 arithmetic and 16-bit storage enabled. Returns false when the
+// driver does not offer them (creation fails cleanly in that case).
+bool createFp16Device(const vva::VulkanContext& base, Dev& out) {
+    static const char* const kExtensions[] = {"VK_KHR_shader_float16_int8", "VK_KHR_16bit_storage"};
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        VkPhysicalDevice16BitStorageFeatures storage{};
+        storage.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES;
+        storage.storageBuffer16BitAccess = VK_TRUE;
+        VkPhysicalDeviceShaderFloat16Int8FeaturesKHR fp16{};
+        fp16.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES_KHR;
+        fp16.shaderFloat16 = VK_TRUE;
+        fp16.pNext = &storage;
+
+        const float priority = 1.0f;
+        VkDeviceQueueCreateInfo qi{};
+        qi.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        qi.queueFamilyIndex = base.queueFamilyIndex;
+        qi.queueCount = 1;
+        qi.pQueuePriorities = &priority;
+
+        VkDeviceCreateInfo di{};
+        di.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        di.pNext = &fp16;
+        di.queueCreateInfoCount = 1;
+        di.pQueueCreateInfos = &qi;
+        di.enabledExtensionCount = attempt == 0 ? 2u : 1u;  // second try: without the 16-bit storage extension name
+        di.ppEnabledExtensionNames = kExtensions;
+
+        VkDevice device = VK_NULL_HANDLE;
+        if (vkCreateDevice(base.physicalDevice, &di, nullptr, &device) == VK_SUCCESS) {
+            out.physicalDevice = base.physicalDevice;
+            out.device = device;
+            out.queueFamilyIndex = base.queueFamilyIndex;
+            vkGetDeviceQueue(device, base.queueFamilyIndex, 0, &out.computeQueue);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Runs one kernel on one problem size and fills `res`.
+Status runConfig(const Dev& c, Pipeline& p, const Variant& v, const Config& cfg, Result& res) {
+    res = Result();
+    if (cfg.w % v.px != 0 || cfg.cout % 8 != 0) return kVulkanError;
+
+    const size_t elem = v.half ? sizeof(uint16_t) : sizeof(float);
     const size_t plane = static_cast<size_t>(cfg.h) * cfg.w;
-    const size_t inCount = static_cast<size_t>(cfg.cin) * plane;
+    const size_t pw = static_cast<size_t>(cfg.w) + 2;
+    const size_t inPlane = v.padded ? static_cast<size_t>(cfg.h + 2) * pw : plane;
+    const size_t inCount = static_cast<size_t>(cfg.cin) * inPlane;
     const size_t outCount = static_cast<size_t>(cfg.cout) * plane;
     const size_t wCount = static_cast<size_t>(cfg.cout) * cfg.cin * 9;
 
-    // Random data; weights are kept in logical order for the CPU check and packed for the shader.
     std::mt19937 rng(1234);
     std::uniform_real_distribution<float> dist(-0.5f, 0.5f);
-    std::vector<float> input(inCount), wlog(wCount);
-    for (float& v : input) v = dist(rng) + 0.5f;
-    for (float& v : wlog) v = dist(rng) * 0.1f;
+    std::vector<float> input(static_cast<size_t>(cfg.cin) * plane), wlog(wCount);
+    for (float& x : input) x = dist(rng) + 0.5f;
+    for (float& x : wlog) x = dist(rng) * 0.1f;
 
     Buffer bin, bw, bout;
-    bool ok = createBuffer(c, inCount * sizeof(float), bin) && createBuffer(c, wCount * sizeof(float), bw) &&
-              createBuffer(c, outCount * sizeof(float), bout);
+    Status status = kOk;
+    bool ok = createBuffer(c, inCount * elem, bin) && createBuffer(c, wCount * elem, bw) &&
+              createBuffer(c, outCount * elem, bout);
+
+    auto store = [&](void* base, size_t index, float value) {
+        if (v.half) static_cast<uint16_t*>(base)[index] = floatToHalf(value);
+        else static_cast<float*>(base)[index] = value;
+    };
+
     if (ok) {
-        std::memcpy(bin.mapped, input.data(), inCount * sizeof(float));
-        float* packed = static_cast<float*>(bw.mapped);
+        std::memset(bin.mapped, 0, inCount * elem);
+        for (int ic = 0; ic < cfg.cin; ++ic) {
+            for (int y = 0; y < cfg.h; ++y) {
+                for (int x = 0; x < cfg.w; ++x) {
+                    const size_t dstIndex = v.padded ? static_cast<size_t>(ic) * inPlane + (static_cast<size_t>(y) + 1) * pw + x + 1
+                                                     : static_cast<size_t>(ic) * plane + static_cast<size_t>(y) * cfg.w + x;
+                    store(bin.mapped, dstIndex, input[static_cast<size_t>(ic) * plane + static_cast<size_t>(y) * cfg.w + x]);
+                }
+            }
+        }
         for (int ocb = 0; ocb < cfg.cout / 8; ++ocb) {
             for (int ic = 0; ic < cfg.cin; ++ic) {
                 for (int tap = 0; tap < 9; ++tap) {
                     for (int j = 0; j < 8; ++j) {
                         const size_t dstIndex = ((static_cast<size_t>(ocb) * cfg.cin + ic) * 9 + tap) * 8 + j;
-                        packed[dstIndex] = wlog[((static_cast<size_t>(ocb) * 8 + j) * cfg.cin + ic) * 9 + tap];
+                        store(bw.mapped, dstIndex, wlog[((static_cast<size_t>(ocb) * 8 + j) * cfg.cin + ic) * 9 + tap]);
                     }
                 }
             }
         }
-        std::memset(bout.mapped, 0, outCount * sizeof(float));
+        std::memset(bout.mapped, 0, outCount * elem);
     }
 
     VkDescriptorSet set = VK_NULL_HANDLE;
     VkCommandBuffer cmd = VK_NULL_HANDLE;
-    const int kPerSubmit = 3;
+    const int kPerSubmit = 2;
     const int kSubmits = 6;
     double seconds = 0.0;
 
     if (ok) {
         vkResetDescriptorPool(c.device, p.pool, 0);
         vkResetCommandPool(c.device, p.cmdPool, 0);
-
         VkDescriptorSetAllocateInfo ai{};
         ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
         ai.descriptorPool = p.pool;
@@ -260,9 +405,11 @@ bool runConfig(const vva::VulkanContext& c, Pipeline& p, const Config& cfg, doub
         barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        const uint32_t gx = static_cast<uint32_t>(((cfg.w / v.px) + v.wgx - 1) / v.wgx);
+        const uint32_t gy = static_cast<uint32_t>((cfg.h + v.wgy - 1) / v.wgy);
+        const uint32_t gz = static_cast<uint32_t>(cfg.cout / 8);
         for (int i = 0; i < kPerSubmit; ++i) {
-            vkCmdDispatch(cmd, static_cast<uint32_t>((cfg.w + 7) / 8), static_cast<uint32_t>((cfg.h + 7) / 8),
-                          static_cast<uint32_t>(cfg.cout / 8));
+            vkCmdDispatch(cmd, gx, gy, gz);
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                                  &barrier, 0, nullptr, 0, nullptr);
         }
@@ -275,20 +422,27 @@ bool runConfig(const vva::VulkanContext& c, Pipeline& p, const Config& cfg, doub
         si.pCommandBuffers = &cmd;
         for (int s = 0; s < kSubmits + 1 && ok; ++s) {  // the first submit is a warm-up
             const auto t0 = std::chrono::steady_clock::now();
-            ok = check(vkQueueSubmit(c.computeQueue, 1, &si, p.fence), "vkQueueSubmit") &&
-                 check(vkWaitForFences(c.device, 1, &p.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+            ok = check(vkQueueSubmit(c.computeQueue, 1, &si, p.fence), "vkQueueSubmit");
+            if (!ok) break;
+            const VkResult wr = vkWaitForFences(c.device, 1, &p.fence, VK_TRUE, 20ull * 1000ull * 1000ull * 1000ull);
+            if (wr == VK_TIMEOUT) {
+                std::printf("  the GPU did not finish within 20 s - stopping\n");
+                return kFatal;  // resources are left alone on purpose: the GPU may still be using them
+            }
+            ok = check(wr, "vkWaitForFences");
             const auto t1 = std::chrono::steady_clock::now();
             vkResetFences(c.device, 1, &p.fence);
             if (s > 0) seconds += std::chrono::duration<double>(t1 - t0).count();
         }
     }
 
-    correct = false;
     if (ok) {
-        // CPU reference at random positions.
-        const float* out = static_cast<const float*>(bout.mapped);
+        const void* out = bout.mapped;
+        auto fetch = [&](size_t index) -> double {
+            return v.half ? halfToFloat(static_cast<const uint16_t*>(out)[index]) : static_cast<const float*>(out)[index];
+        };
         std::mt19937 pick(99);
-        int bad = 0;
+        double worst = 0.0;
         for (int n = 0; n < 200; ++n) {
             const int oc = static_cast<int>(pick() % cfg.cout);
             const int y = static_cast<int>(pick() % cfg.h);
@@ -299,61 +453,29 @@ bool runConfig(const vva::VulkanContext& c, Pipeline& p, const Config& cfg, doub
                     for (int kx = 0; kx < 3; ++kx) {
                         const int yy = y + ky - 1, xx = x + kx - 1;
                         if (yy < 0 || yy >= cfg.h || xx < 0 || xx >= cfg.w) continue;
-                        ref += static_cast<double>(input[ic * plane + static_cast<size_t>(yy) * cfg.w + xx]) *
+                        ref += static_cast<double>(input[static_cast<size_t>(ic) * plane + static_cast<size_t>(yy) * cfg.w + xx]) *
                                wlog[(static_cast<size_t>(oc) * cfg.cin + ic) * 9 + ky * 3 + kx];
                     }
                 }
             }
-            const double got = out[static_cast<size_t>(oc) * plane + static_cast<size_t>(y) * cfg.w + x];
-            if (std::fabs(got - ref) > 1e-3 * std::fmax(1.0, std::fabs(ref))) ++bad;
+            const double got = fetch(static_cast<size_t>(oc) * plane + static_cast<size_t>(y) * cfg.w + x);
+            const double e = std::fabs(got - ref) / std::fmax(1.0, std::fabs(ref));
+            if (!(e == e)) worst = HUGE_VAL;  // NaN counts as a failure and stays one
+            else if (e > worst) worst = e;
         }
-        correct = bad == 0;
+        res.err = worst;
+        res.correct = worst <= (v.half ? 3e-2 : 1e-3);
         const double dispatches = static_cast<double>(kSubmits) * kPerSubmit;
-        msPerDispatch = seconds * 1000.0 / dispatches;
-        const double flops = 2.0 * cfg.cin * cfg.cout * 9.0 * plane;
-        gflops = flops * dispatches / seconds / 1e9;
+        res.ms = seconds * 1000.0 / dispatches;
+        res.gflops = 2.0 * cfg.cin * cfg.cout * 9.0 * static_cast<double>(plane) * dispatches / seconds / 1e9;
+        res.ran = true;
+    } else {
+        status = kVulkanError;
     }
 
     destroyBuffer(c, bin);
     destroyBuffer(c, bw);
     destroyBuffer(c, bout);
-    return ok;
-}
-
-int runBench(const vva::VulkanContext& c, const char* spvPath) {
-    std::vector<uint32_t> code;
-    if (!loadSpirv(spvPath, code)) {
-        std::printf("cannot read the shader %s\n", spvPath);
-        return 1;
-    }
-    Pipeline pipe;
-    if (!createPipeline(c, code, 1, pipe)) {
-        destroyPipeline(c, pipe);
-        return 3;
-    }
-    const Config configs[] = {{64, 32, 128, 128}, {64, 64, 128, 128}, {64, 64, 256, 256}};
-    int status = 0;
-    double reference = 0.0;
-    for (const Config& cfg : configs) {
-        double gflops = 0.0, ms = 0.0;
-        bool correct = false;
-        if (!runConfig(c, pipe, cfg, gflops, ms, correct)) {
-            status = 3;
-            break;
-        }
-        std::printf("conv3x3 %3d -> %3d channels at %dx%d: %7.2f ms, %6.1f GFLOP/s, output %s\n", cfg.cin, cfg.cout,
-                    cfg.w, cfg.h, ms, gflops, correct ? "correct" : "WRONG");
-        if (!correct) status = 4;
-        if (cfg.cout == 64 && cfg.h == 128) reference = gflops;
-    }
-    if (status == 0 && reference > 0.0) {
-        // maru-x4 (RRDBNet nf=64 gc=32 nb=6) on a 128x192 image: 2 * 5,706,432 MAC/px * 24,576 px
-        const double modelFlops = 2.0 * 5706432.0 * 24576.0;
-        std::printf("\nRough estimate for maru-x4 on a 128x192 image with this kernel: %.1f s\n",
-                    modelFlops / (reference * 1e9));
-        std::printf("(measured on this phone's CPU with 8 threads: 15.0 s)\n");
-    }
-    destroyPipeline(c, pipe);
     return status;
 }
 
@@ -361,9 +483,11 @@ int runBench(const vva::VulkanContext& c, const char* spvPath) {
 
 int main(int argc, char** argv) {
     if (argc != 2) {
-        std::printf("usage: vva-gpubench conv3x3.spv\n");
+        std::printf("usage: vva-gpubench <directory with the .spv files>\n");
         return 1;
     }
+    const std::string dir = argv[1];
+
     vva::VulkanContext ctx;
     if (!ctx.init()) {
         std::printf("Vulkan is not available\n");
@@ -372,7 +496,96 @@ int main(int argc, char** argv) {
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(ctx.physicalDevice, &props);
     std::printf("Device: %s\n", props.deviceName);
-    std::printf("Max workgroup invocations: %u, shared memory: %u bytes\n",
+    std::printf("Max workgroup invocations: %u, shared memory: %u bytes\n\n",
                 props.limits.maxComputeWorkGroupInvocations, props.limits.maxComputeSharedMemorySize);
-    return runBench(ctx, argv[1]);
+
+    Dev dev32;
+    dev32.physicalDevice = ctx.physicalDevice;
+    dev32.device = ctx.device;
+    dev32.computeQueue = ctx.computeQueue;
+    dev32.queueFamilyIndex = ctx.queueFamilyIndex;
+    Dev dev16;
+    bool tried16 = false, have16 = false;
+
+    const Config smoke = {64, 32, 32, 32};  // quick correctness gate before the heavy sizes
+    const Config configs[] = {{64, 32, 128, 128}, {64, 64, 128, 128}, {64, 64, 256, 256}};
+    const size_t kVariantCount = sizeof(kVariants) / sizeof(kVariants[0]);
+    std::vector<Result> finalResult(kVariantCount);
+    int rc = 0;
+
+    for (size_t vi = 0; vi < kVariantCount; ++vi) {
+        const Variant& v = kVariants[vi];
+        std::printf("== %s ==\n", v.label);
+
+        std::vector<uint32_t> code;
+        if (!loadSpirv(dir + "/" + v.file, code)) {
+            std::printf("  skipped: shader %s not found\n\n", v.file);
+            continue;
+        }
+        Dev* dev = &dev32;
+        if (v.half) {
+            if (!tried16) {
+                tried16 = true;
+                have16 = createFp16Device(ctx, dev16);
+            }
+            if (!have16) {
+                std::printf("  skipped: this device does not offer fp16 compute\n\n");
+                continue;
+            }
+            dev = &dev16;
+        }
+        Pipeline pipe;
+        if (!createPipeline(*dev, code, pipe)) {
+            std::printf("  skipped: the driver could not build this pipeline\n\n");
+            destroyPipeline(*dev, pipe);
+            continue;
+        }
+
+        Result res;
+        Status st = runConfig(*dev, pipe, v, smoke, res);
+        if (st == kFatal) return 5;
+        if (st != kOk || !res.correct) {
+            std::printf("  skipped: failed the correctness check (error %.1e)\n\n", res.err);
+            if (vi == 0) rc = 4;
+            destroyPipeline(*dev, pipe);
+            continue;
+        }
+        for (const Config& cfg : configs) {
+            st = runConfig(*dev, pipe, v, cfg, res);
+            if (st == kFatal) return 5;
+            if (st != kOk) break;
+            std::printf("  %3d -> %3d channels at %3dx%-3d: %8.2f ms, %7.1f GFLOP/s, max error %.1e %s\n", cfg.cin, cfg.cout,
+                        cfg.w, cfg.h, res.ms, res.gflops, res.err, res.correct ? "(ok)" : "(WRONG)");
+            if (cfg.cout == 64 && cfg.h == 256) finalResult[vi] = res;
+        }
+        std::printf("\n");
+        destroyPipeline(*dev, pipe);
+    }
+
+    std::printf("== Summary (64 -> 64 channels at 256x256, the shape of the large layers) ==\n");
+    double best = 0.0;
+    const char* bestName = "";
+    for (size_t vi = 0; vi < kVariantCount; ++vi) {
+        const Result& r = finalResult[vi];
+        if (!r.ran) {
+            std::printf("  %-14s not measured\n", kVariants[vi].label);
+            continue;
+        }
+        std::printf("  %-14s %7.1f GFLOP/s   max error %.1e %s\n", kVariants[vi].label, r.gflops, r.err,
+                    r.correct ? "" : "(WRONG)");
+        if (r.correct && r.gflops > best) {
+            best = r.gflops;
+            bestName = kVariants[vi].label;
+        }
+    }
+    if (best > 0.0) {
+        const double modelFlops = 2.0 * 5706432.0 * 24576.0;  // maru-x4 on a 128x192 image
+        std::printf("\nBest: %s. Rough estimate for maru-x4 on a 128x192 image: %.1f s (CPU, 8 threads: 15.0 s)\n", bestName,
+                    modelFlops / (best * 1e9));
+    } else {
+        rc = rc ? rc : 3;
+    }
+
+    if (have16) vkDestroyDevice(dev16.device, nullptr);
+    return rc;
 }
