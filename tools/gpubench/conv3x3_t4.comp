@@ -1,0 +1,77 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 4, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer InBuf { float src[]; };
+layout(std430, set = 0, binding = 1) readonly buffer WBuf { vec4 wgt[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { vec4 dst[]; };
+
+layout(push_constant) uniform Params {
+    int cin;
+    int cout;
+    int height;
+    int width;
+} p;
+
+// Input planes are padded by one zero pixel on every side, so no bounds checks are needed.
+// Each invocation computes 4 neighbouring pixels x 8 output channels.
+void main() {
+    int x0 = int(gl_GlobalInvocationID.x) * 4;
+    int y = int(gl_GlobalInvocationID.y);
+    int ocb = int(gl_GlobalInvocationID.z);
+    if (x0 >= p.width || y >= p.height) {
+        return;
+    }
+
+    int pw = p.width + 2;
+    int inPlane = (p.height + 2) * pw;
+
+    vec4 a0l = vec4(0.0);
+    vec4 a0h = vec4(0.0);
+    vec4 a1l = vec4(0.0);
+    vec4 a1h = vec4(0.0);
+    vec4 a2l = vec4(0.0);
+    vec4 a2h = vec4(0.0);
+    vec4 a3l = vec4(0.0);
+    vec4 a3h = vec4(0.0);
+
+    for (int ic = 0; ic < p.cin; ++ic) {
+        int wBase = (ocb * p.cin + ic) * 18;
+        int rBase = ic * inPlane + y * pw + x0;
+        for (int ky = 0; ky < 3; ++ky) {
+            int r = rBase + ky * pw;
+            float v0 = src[r];
+            float v1 = src[r + 1];
+            float v2 = src[r + 2];
+            float v3 = src[r + 3];
+            float v4 = src[r + 4];
+            float v5 = src[r + 5];
+            int wi = wBase + ky * 6;
+            vec4 w0l = wgt[wi];
+            vec4 w0h = wgt[wi + 1];
+            vec4 w1l = wgt[wi + 2];
+            vec4 w1h = wgt[wi + 3];
+            vec4 w2l = wgt[wi + 4];
+            vec4 w2h = wgt[wi + 5];
+            a0l += v0 * w0l + v1 * w1l + v2 * w2l;
+            a0h += v0 * w0h + v1 * w1h + v2 * w2h;
+            a1l += v1 * w0l + v2 * w1l + v3 * w2l;
+            a1h += v1 * w0h + v2 * w1h + v3 * w2h;
+            a2l += v2 * w0l + v3 * w1l + v4 * w2l;
+            a2h += v2 * w0h + v3 * w1h + v4 * w2h;
+            a3l += v3 * w0l + v4 * w1l + v5 * w2l;
+            a3h += v3 * w0h + v4 * w1h + v5 * w2h;
+        }
+    }
+
+    int plane = p.height * p.width;
+    int cs = plane / 4;
+    int o4 = ((ocb * 8) * plane + y * p.width + x0) / 4;
+    dst[o4] = vec4(a0l.x, a1l.x, a2l.x, a3l.x);
+    dst[o4 + cs] = vec4(a0l.y, a1l.y, a2l.y, a3l.y);
+    dst[o4 + 2 * cs] = vec4(a0l.z, a1l.z, a2l.z, a3l.z);
+    dst[o4 + 3 * cs] = vec4(a0l.w, a1l.w, a2l.w, a3l.w);
+    dst[o4 + 4 * cs] = vec4(a0h.x, a1h.x, a2h.x, a3h.x);
+    dst[o4 + 5 * cs] = vec4(a0h.y, a1h.y, a2h.y, a3h.y);
+    dst[o4 + 6 * cs] = vec4(a0h.z, a1h.z, a2h.z, a3h.z);
+    dst[o4 + 7 * cs] = vec4(a0h.w, a1h.w, a2h.w, a3h.w);
+}
