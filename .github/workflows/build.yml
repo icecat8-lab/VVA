@@ -64,6 +64,23 @@ jobs:
             -DVVA_BUILD_CLI=ON
           cmake --build build-native --parallel
 
+      - name: Build GPU benchmark (optional)
+        continue-on-error: true
+        run: |
+          GLSLC="$NDK/shader-tools/linux-x86_64/glslc"
+          test -x "$GLSLC" || { echo "::error::glslc not found in the NDK"; exit 1; }
+          mkdir -p dist-bench
+          "$GLSLC" -O --target-env=vulkan1.1 -o dist-bench/conv3x3.spv tools/gpubench/conv3x3.comp
+          cmake -S . -B build-bench \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-26 \
+            -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DVVA_BUILD_GPUBENCH=ON
+          cmake --build build-bench --target vva-gpubench
+          cp build-bench/vva-gpubench dist-bench/vva-gpubench-arm64-v8a
+
       - name: Collect release files
         run: |
           mkdir -p dist
@@ -73,6 +90,7 @@ jobs:
           cp build-native/vva-cli dist/vva-cli-arm64-v8a
           cp build-native/libvva.so dist/libvva-arm64-v8a.so
           cp docs/FORMAT.md dist/VVA_FORMAT.md
+          cp dist-bench/* dist/ 2>/dev/null || echo "GPU benchmark not built"
 
           LIST="$(unzip -l "dist/vva-android-$TAG.aar")"
           echo "$LIST"
