@@ -71,6 +71,8 @@ jobs:
           test -x "$GLSLC" || { echo "::error::glslc not found in the NDK"; exit 1; }
           mkdir -p dist-bench
           "$GLSLC" -O --target-env=vulkan1.1 -o dist-bench/conv3x3.spv tools/gpubench/conv3x3.comp
+          "$GLSLC" -O --target-env=vulkan1.1 -o dist-bench/conv3x3_t4.spv tools/gpubench/conv3x3_t4.comp || echo "::warning::tiled fp32 shader failed to compile"
+          "$GLSLC" -O --target-env=vulkan1.1 -o dist-bench/conv3x3_t4_f16.spv tools/gpubench/conv3x3_t4_f16.comp || echo "::warning::fp16 shader failed to compile"
           cmake -S . -B build-bench \
             -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
