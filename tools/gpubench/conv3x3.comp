@@ -1,0 +1,54 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer InBuf { float src[]; };
+layout(std430, set = 0, binding = 1) readonly buffer WBuf { vec4 wgt[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer OutBuf { float dst[]; };
+
+layout(push_constant) uniform Params {
+    int cin;
+    int cout;
+    int height;
+    int width;
+} p;
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    int ocb = int(gl_GlobalInvocationID.z);
+    if (x >= p.width || y >= p.height) {
+        return;
+    }
+
+    vec4 accLo = vec4(0.0);
+    vec4 accHi = vec4(0.0);
+    int plane = p.height * p.width;
+
+    for (int ic = 0; ic < p.cin; ++ic) {
+        int inBase = ic * plane;
+        int wBase = (ocb * p.cin + ic) * 18;
+        for (int ky = 0; ky < 3; ++ky) {
+            int yy = y + ky - 1;
+            for (int kx = 0; kx < 3; ++kx) {
+                int xx = x + kx - 1;
+                float v = 0.0;
+                if (yy >= 0 && yy < p.height && xx >= 0 && xx < p.width) {
+                    v = src[inBase + yy * p.width + xx];
+                }
+                int wi = wBase + (ky * 3 + kx) * 2;
+                accLo += v * wgt[wi];
+                accHi += v * wgt[wi + 1];
+            }
+        }
+    }
+
+    int o = (ocb * 8) * plane + y * p.width + x;
+    dst[o] = accLo.x;
+    dst[o + plane] = accLo.y;
+    dst[o + 2 * plane] = accLo.z;
+    dst[o + 3 * plane] = accLo.w;
+    dst[o + 4 * plane] = accHi.x;
+    dst[o + 5 * plane] = accHi.y;
+    dst[o + 6 * plane] = accHi.z;
+    dst[o + 7 * plane] = accHi.w;
+}
