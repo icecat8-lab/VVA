@@ -1,148 +1,143 @@
 # VVA
 
-A small super-resolution inference engine for Android. It runs `.vva` models
-(a compact, checksummed model format with the graph included) on the phone's CPU,
-tiles large images so memory stays bounded, and ships as an AAR for apps plus a
-command-line tool.
+VVA is a small inference engine for running image models on Android. It loads models in the
+`.vva` format, a single checksummed file that contains both the network graph and its weights, and
+runs them on the CPU. Large images are processed in tiles so memory use stays bounded.
 
-* Runs the x4 **RRDBNet** of basicsr / Real-ESRGAN (and models trained with that code) and torchvision
-  **MobileNetV3-Small** image classifiers (for example to choose which upscaler to use).
-* **CPU only**, multi-threaded, float32 maths with fp16 weights on disk. No Vulkan or NNAPI
-  is needed to process an image (Vulkan is only probed by `vva-cli --info`).
-* Android 8.0+ (API 26), arm64-v8a. A 16 KB-page-aligned `libvva_engine.so`, no `libc++_shared.so`.
-* Progress callback, cancellation, alpha channel, `Bitmap` and `HardwareBuffer` input/output.
+The project provides an Android library (AAR), a command-line tool, and a converter for PyTorch
+checkpoints.
 
-> **Speed.** Every convolution runs on CPU cores, so heavy models (for example 23 RRDB
-> blocks) are much slower than a GPU engine such as ncnn with Vulkan. Small and medium
-> models are fine. Measure on your target phone; the memory budget and thread count are
-> adjustable. A GPU backend is not included (see `experimental/README.md`).
+## Supported models
 
-## 1. Convert a model
+| Kind | Architecture | Use |
+|------|--------------|-----|
+| Upscaler | x4 RRDBNet (basicsr / Real-ESRGAN layout) | `upscale()` |
+| Classifier | torchvision MobileNetV3-Small | `classify()`, for example to pick an upscaler |
+
+Other architectures are rejected by the converter with an explanation of what is missing.
+
+## Limitations
+
+* Processing runs on the CPU only. There is no GPU or NPU backend yet, so large models are slow:
+  on a mid-range phone, the 6-block RRDBNet used for testing needs about 15 seconds to turn a
+  128x192 image into 512x768 with 8 threads. Measure on your own target device.
+* The Android build is arm64-v8a only and requires Android 8.0 (API 26) or newer.
+
+## Converting a model
 
 ```bash
-pip install ./python            # numpy only
-pip install torch               # only needed to read .pth files
+pip install ./python        # requires numpy
+pip install torch           # only needed to read .pth files
+
 vva-convert -i model.pth -o model.vva --name "my-model"
 ```
 
-* Input: a `.pth` / `.pt` checkpoint (`params_ema`, `params` and `state_dict` wrappers and a
-  `module.` prefix are handled) or a plain `.npz` of weights.
-* `.pth` files are loaded with `weights_only=True` (PyTorch 1.13+); add `--allow-pickle` only for files you trust.
-* After writing, the converter re-reads the file and checks the stored graph against the original
-  network on a random image; it prints the numerical error and fails if they disagree.
-* Options: `--fp32` (no fp16 rounding), `--lrelu-slope`, `--res-scale` (defaults 0.2, as in basicsr),
-  `--no-verify`.
-* Classifiers (MobileNetV3-Small): `vva-convert -i classifier.pth -o classifier.vva --classes photo,anime`.
-  Class names are in output order. The image is resized to `--input-size` (default 224) and normalised with
-  `--mean` / `--std` (defaults: ImageNet); these must match how the model was trained, and they are stored in the file.
-* Not supported (reported with a clear error): models with pixel-unshuffle (x2 / x1 variants),
-  other architectures. The `.vva` is self-contained; there is no `.json` sidecar any more.
+The input can be a `.pth` / `.pt` checkpoint or a plain `.npz` file of weights. Checkpoints are loaded
+with `weights_only=True`; pass `--allow-pickle` only for files you trust. After writing the file, the
+converter reads it back and compares the result with the original network, and it stops with an error
+if the two disagree.
 
-## 2. Use it in an app
+Useful options: `--fp32` stores weights at full precision (the default is fp16 and the file is half
+the size), and `--no-verify` skips the check.
 
-Download `vva-android-<tag>.aar` from the GitHub release, put it in `app/libs/` and add:
+For a classifier, give the class names in output order and the preprocessing used in training:
 
-```gradle
-dependencies {
-    implementation files('libs/vva-android-v1.0.0.aar')
-}
+```bash
+vva-convert -i classifier.pth -o classifier.vva --classes photo,anime
 ```
 
-Copy the model out of `assets/` once (the engine memory-maps a real file), then:
+The image is resized to `--input-size` (default 224) and normalised with `--mean` and `--std`
+(default: ImageNet values). These settings are stored in the file and must match the training setup.
+
+## Using the library in an app
+
+Download `vva-android-<tag>.aar` from the Releases page, place it in `app/libs/`, and add it to
+`build.gradle`:
+
+```gradle
+implementation files('libs/vva-android-<tag>.aar')
+```
+
+The engine reads the model from a real file, so copy it out of `assets/` once. Then, on a
+background thread:
 
 ```java
-File model = new File(getFilesDir(), "model.vva");
-if (!model.exists()) {
-    try (InputStream in = getAssets().open("model.vva");
-         OutputStream out = new FileOutputStream(model)) {
-        byte[] buf = new byte[1 << 16];
-        for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
-    }
-}
-
-// On a background thread:
 try (VVAEngine engine = new VVAEngine()) {
-    if (!engine.init(model.getAbsolutePath())) {
+    if (!engine.init(modelFile.getAbsolutePath())) {
         Log.e("VVA", engine.getLastError());
         return;
     }
-    engine.setMemoryBudgetMb(256);                  // optional, default 320
-    Bitmap big = engine.upscale(photo, fraction -> {
-        runOnUiThread(() -> progressBar.setProgress((int) (fraction * 100)));
-        return !userCancelled;                       // return false to cancel
-    });
-    if (big == null) Log.e("VVA", engine.getLastError());
+    Bitmap result = engine.upscale(photo, fraction -> !cancelled);   // return false to cancel
+    if (result == null) Log.e("VVA", engine.getLastError());
 }
 ```
 
-Choosing a model with a classifier (two engines, one per model file):
+To choose a model automatically, load a classifier in a separate engine:
 
 ```java
-VVAEngine.Classification c = classifier.classify(photo);      // null on failure, see getLastError()
-VVAEngine upscaler = c != null && c.label.equals("anime") ? animeEngine : photoEngine;
-Bitmap big = upscaler.upscale(photo, null);
+VVAEngine.Classification c = classifier.classify(photo);
+VVAEngine upscaler = (c != null && c.label.equals("anime")) ? animeEngine : photoEngine;
 ```
 
-Keep one `VVAEngine` for the lifetime of the screen instead of creating one per image.
-`engine.cancel()` can be called from any thread. Other entry points:
-`processBitmap(in, out, listener)` for your own output bitmap and
-`processZeroCopy(HardwareBuffer in, HardwareBuffer out)` (CPU access to the buffers,
-RGBA_8888, allocate with `USAGE_CPU_READ_OFTEN` / `USAGE_CPU_WRITE_OFTEN`).
+Notes:
 
-Notes
+* `init`, `upscale` and `classify` block, so never call them on the UI thread.
+* Create one engine per model and keep it for the lifetime of the screen.
+* `cancel()` may be called from any thread.
+* `setMemoryBudgetMb()`, `setThreads()` and `setTileSize()` adjust memory use and speed.
+* `processBitmap()` writes into a bitmap you supply, and `processZeroCopy()` works with
+  `HardwareBuffer` objects (RGBA_8888, with CPU read/write usage flags).
 
-* Call `init`/`upscale` from a worker thread; both block.
-* Tile size is chosen automatically from the memory budget. For a 12 MP photo the image is
-  processed in tiles and the result is written straight into the output bitmap.
-  `setTilePad` (default 16) is the overlap used to hide tile borders.
-* R8 / ProGuard rules are included in the AAR.
+## Command-line tool
 
-## 3. Command line (Termux, adb shell, Linux)
+`vva-cli` runs the same engine from Termux, `adb shell` or a Linux machine:
 
 ```bash
-vva-cli info model.vva                                  # check a model
-vva-cli run model.vva in.ppm out.ppm --threads 4        # upscale a P6 PPM image
-vva-cli classify classifier.vva in.ppm                  # class, confidence and logits of a classifier
-vva-cli --info                                          # Vulkan diagnostics
+vva-cli info model.vva                              # check a model
+vva-cli run model.vva in.ppm out.ppm --threads 8    # upscale an image
+vva-cli classify classifier.vva in.ppm              # classify an image
 ```
 
-PPM is used so the tool needs no image libraries; convert with `ffmpeg -i in.png in.ppm`.
+Images use the PPM format so the tool needs no extra libraries. Convert with
+`ffmpeg -i in.png in.ppm`.
 
-## Building
+## Building and testing
 
-GitHub Actions (`Build VVA`, manual trigger) runs all tests, builds the AAR, `libvva.so` and
-`vva-cli` for arm64-v8a and attaches them to a release. Locally:
+The GitHub Actions workflow `Build VVA` runs the tests, builds the AAR and the command-line tool,
+and attaches them to a release. To build the library locally you need JDK 17, the Android SDK and
+NDK 26.3:
 
 ```bash
-gradle :vva-android:assembleRelease                      # needs JDK 17, Android SDK + NDK 26.3
-python3 tests/test_format.py && python3 tests/test_converter.py && \
-python3 tests/test_engine.py && python3 tests/check_jni.py   # host tests (g++, numpy)
+gradle :vva-android:assembleRelease
 ```
 
-## What is tested
+The host tests need `g++`, `numpy` and `pillow`:
 
-The host tests build the real C++ sources with AddressSanitizer + UBSan and compare against an
-independent numpy implementation: RRDBNet outputs for odd image sizes and channel counts
-(exercising every kernel remainder), every operator and convolution variant, fp16 conversion of
-all special values, thread-count independence (bit-identical), tiling vs whole image, progress,
-cancellation, alpha, memory-budget tiling, corrupted and hostile model files, the converter and
-its error paths, and the JNI pixel handling (strides, premultiplied alpha). `check_jni.py` verifies
-that the Java `native` declarations match the C++ functions.
-
-Not testable off-device and therefore **not verified here**: the Android build itself
-(NDK / Gradle / AAR packaging), JNI calls into a real `Bitmap` / `HardwareBuffer`, and speed on a
-phone. Run the app once on a device before shipping.
-
-## Layout
-
-```
-core/            model reader (model.cpp), CPU executor (exec.cpp), engine (vva.cpp)
-android/         Gradle module + JNI (vva_jni.cpp) + Java API (VVAEngine.java)
-cli/             vva-cli
-python/          vva-convert, the .vva writer/reader, numpy reference implementation
-docs/FORMAT.md   the .vva format
-tests/           host tests
-experimental/    unfinished GPU / NPU code (not built)
+```bash
+python3 tests/test_format.py
+python3 tests/test_converter.py
+python3 tests/test_engine.py
+python3 tests/check_jni.py
 ```
 
-License: see `LICENSE`.
+They compile the real C++ sources with AddressSanitizer and UBSan and compare every operator, the
+converter output and the classifier pipeline against independent numpy and PIL implementations.
+
+Not covered by these tests: the Android build itself and calls into a real `Bitmap` or
+`HardwareBuffer` on a device. Test the library inside an app before shipping it.
+
+## Repository layout
+
+```
+core/          model reader, CPU executor, engine
+android/       Gradle module, JNI bridge, Java API
+cli/           command-line tool
+python/        converter, .vva reader and writer, numpy reference
+docs/FORMAT.md description of the .vva format
+tests/         host tests
+experimental/  unfinished GPU and NPU code (not built)
+```
+
+## License
+
+See `LICENSE`.
