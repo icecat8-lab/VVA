@@ -7,15 +7,6 @@ runs them on the CPU. Large images are processed in tiles so memory use stays bo
 The project provides an Android library (AAR), a command-line tool, and a converter for PyTorch
 checkpoints.
 
-## Supported models
-
-| Kind | Architecture | Use |
-|------|--------------|-----|
-| Upscaler | x4 RRDBNet (basicsr / Real-ESRGAN layout) | `upscale()` |
-| Classifier | torchvision MobileNetV3-Small | `classify()`, for example to pick an upscaler |
-
-Other architectures are rejected by the converter with an explanation of what is missing.
-
 ## Limitations
 
 * Processing runs on the CPU only. There is no GPU or NPU backend yet, so large models are slow:
@@ -125,18 +116,6 @@ converter output and the classifier pipeline against independent numpy and PIL i
 
 Not covered by these tests: the Android build itself and calls into a real `Bitmap` or
 `HardwareBuffer` on a device. Test the library inside an app before shipping it.
-
-## Repository layout
-
-```
-core/          model reader, CPU executor, engine
-android/       Gradle module, JNI bridge, Java API
-cli/           command-line tool
-python/        converter, .vva reader and writer, numpy reference
-docs/FORMAT.md description of the .vva format
-tests/         host tests
-experimental/  unfinished GPU and NPU code (not built)
-```
 
 ## License
 
