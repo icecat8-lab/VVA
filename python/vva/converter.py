@@ -1,10 +1,15 @@
-"""PyTorch (.pth) / NumPy (.npz) RRDBNet checkpoint -> .vva (version 2).
+"""PyTorch (.pth) / NumPy (.npz) checkpoint -> .vva (version 2).
 
-Supported network: the x4 ``RRDBNet`` of basicsr / Real-ESRGAN (and models trained
-with that code), i.e. keys such as ``conv_first``, ``body.N.rdb{1,2,3}.conv{1..5}``,
-``conv_body``, ``conv_up1``, ``conv_up2``, ``conv_hr`` and ``conv_last``.
-The converter writes the complete graph (not just weights), so the engine can run
-the file without any further information.
+Supported networks
+* the x4 ``RRDBNet`` of basicsr / Real-ESRGAN (and models trained with that code): keys such as
+  ``conv_first``, ``body.N.rdb{1,2,3}.conv{1..5}``, ``conv_body``, ``conv_up1``, ``conv_up2``,
+  ``conv_hr`` and ``conv_last``;
+* the torchvision ``MobileNetV3-Small`` image classifier (any number of classes): keys such as
+  ``features.N.block.M...`` and ``classifier.0`` / ``classifier.3``. BatchNorm is folded into the
+  convolutions.
+
+The converter writes the complete graph (not just weights), so the engine can run the file without any
+further information.
 """
 
 import os
@@ -12,7 +17,7 @@ import os
 import numpy as np
 
 from .fileformat import VVAFormatError, VVAWriter, read_vva
-from .reference import rrdbnet_forward, run_graph
+from .reference import MBV3_SMALL, mobilenetv3_small_forward, rrdbnet_forward, run_graph
 
 _FP16_MAX = 65000.0
 _WRAPPER_KEYS = ("params_ema", "params", "state_dict", "model", "net_g", "g_ema")
@@ -228,10 +233,179 @@ def verify_file(path, sd, lrelu_slope=0.2, res_scale=0.2, size=(10, 13), seed=0)
             float(np.max(np.abs(got - want_original))) / span)
 
 
+# ---------------------------------------------------------------------------
+# MobileNetV3-Small classifier
+# ---------------------------------------------------------------------------
+
+def _make_divisible(v, divisor=8):
+    new_v = max(divisor, int(v + divisor / 2) // divisor * divisor)
+    if new_v < 0.9 * v:
+        new_v += divisor
+    return new_v
+
+
+def _need_bn(sd, prefix, channels):
+    for suffix in (".weight", ".bias", ".running_mean", ".running_var"):
+        _need(sd, prefix + suffix, lambda s, c=channels: s == (c,))
+
+
+def inspect_mobilenetv3_small(sd):
+    """Validate the layout against torchvision's MobileNetV3-Small; returns the number of classes."""
+    _need(sd, "features.0.0.weight", lambda s: s == (16, 3, 3, 3))
+    _need_bn(sd, "features.0.1", 16)
+    for i, (cin, k, exp, cout, se, _act, _stride) in enumerate(MBV3_SMALL, start=1):
+        p = "features.%d.block" % i
+        j = 0
+        if exp != cin:
+            _need(sd, "%s.%d.0.weight" % (p, j), lambda s, a=exp, b=cin: s == (a, b, 1, 1))
+            _need_bn(sd, "%s.%d.1" % (p, j), exp)
+            j += 1
+        _need(sd, "%s.%d.0.weight" % (p, j), lambda s, a=exp, kk=k: s == (a, 1, kk, kk))
+        _need_bn(sd, "%s.%d.1" % (p, j), exp)
+        j += 1
+        if se:
+            sq = _make_divisible(exp // 4, 8)
+            _need(sd, "%s.%d.fc1.weight" % (p, j), lambda s, a=sq, b=exp: s == (a, b, 1, 1))
+            _need(sd, "%s.%d.fc1.bias" % (p, j), lambda s, a=sq: s == (a,))
+            _need(sd, "%s.%d.fc2.weight" % (p, j), lambda s, a=exp, b=sq: s == (a, b, 1, 1))
+            _need(sd, "%s.%d.fc2.bias" % (p, j), lambda s, a=exp: s == (a,))
+            j += 1
+        _need(sd, "%s.%d.0.weight" % (p, j), lambda s, a=cout, b=exp: s == (a, b, 1, 1))
+        _need_bn(sd, "%s.%d.1" % (p, j), cout)
+    _need(sd, "features.12.0.weight", lambda s: s == (576, 96, 1, 1))
+    _need_bn(sd, "features.12.1", 576)
+    _need(sd, "classifier.0.weight", lambda s: s == (1024, 576))
+    _need(sd, "classifier.0.bias", lambda s: s == (1024,))
+    last = _need(sd, "classifier.3.weight", lambda s: len(s) == 2 and s[1] == 1024 and s[0] >= 1)
+    _need(sd, "classifier.3.bias", lambda s, n=last.shape[0]: s == (n,))
+    return int(last.shape[0])
+
+
+def build_mobilenetv3_small(sd, name="classifier", classes=None, input_size=224, mean=(0.485, 0.456, 0.406),
+                            std=(0.229, 0.224, 0.225), fp16=True, bn_eps=1e-3, author="", license=""):
+    """Return a VVAWriter holding the MobileNetV3-Small classifier graph (BatchNorm folded in)."""
+    n_classes = inspect_mobilenetv3_small(sd)
+    if classes is not None and len(classes) != n_classes:
+        raise ConversionError("the checkpoint has %d classes but %d class names were given" % (n_classes, len(classes)))
+    writer = VVAWriter(name=name, scale=1, author=author, license=license,
+                       description="MobileNetV3-Small classifier (%d classes)" % n_classes)
+    writer.meta_info["task"] = "classify"
+    writer.meta_info["input_size"] = int(input_size)
+    writer.meta_info["mean"] = [float(v) for v in mean]
+    writer.meta_info["std"] = [float(v) for v in std]
+    if classes:
+        writer.meta_info["classes"] = list(classes)
+    writer.add_input("input", [1, 3, -1, -1])
+
+    counter = [0]
+
+    def uid(base):
+        counter[0] += 1
+        return "%s#%d" % (base, counter[0])
+
+    def put(key, arr, as_weight):
+        arr = np.asarray(arr, dtype=np.float32)
+        if not np.all(np.isfinite(arr)):
+            raise ConversionError("weight '%s' contains NaN or Inf" % key)
+        dtype = "f16" if (fp16 and as_weight and float(np.max(np.abs(arr))) <= _FP16_MAX) else "f32"
+        writer.add_tensor(key, arr, dtype)
+        return key
+
+    def conv(prefix, w, b, x, stride=1, pad=0, groups=1, out=None):
+        out = out or uid(prefix)
+        writer.add_node("Conv2D", [x, put(prefix + ".weight", w, True), put(prefix + ".bias", b, False)], [out],
+                        {"stride": [stride, stride], "padding": [pad, pad], "dilation": [1, 1], "groups": groups},
+                        name=prefix)
+        return out
+
+    def conv_bn(cname, bname, x, stride, pad, groups):
+        w = np.asarray(sd[cname + ".weight"], dtype=np.float64)
+        g = np.asarray(sd[bname + ".weight"], dtype=np.float64)
+        beta = np.asarray(sd[bname + ".bias"], dtype=np.float64)
+        mean_ = np.asarray(sd[bname + ".running_mean"], dtype=np.float64)
+        var = np.asarray(sd[bname + ".running_var"], dtype=np.float64)
+        k = g / np.sqrt(var + bn_eps)
+        bias = beta - mean_ * k
+        if cname + ".bias" in sd:
+            bias = bias + np.asarray(sd[cname + ".bias"], dtype=np.float64) * k
+        return conv(cname, w * k[:, None, None, None], bias, x, stride, pad, groups)
+
+    def act(kind, x, base):
+        out = uid(base + (".hswish" if kind == "HS" else ".relu"))
+        writer.add_node("Hardswish" if kind == "HS" else "ReLU", [x], [out])
+        return out
+
+    x = act("HS", conv_bn("features.0.0", "features.0.1", "input", 2, 1, 1), "features.0")
+    for i, (cin, k, exp, cout, se, a, stride) in enumerate(MBV3_SMALL, start=1):
+        p = "features.%d.block" % i
+        j = 0
+        block_in = x
+        if exp != cin:
+            x = act(a, conv_bn("%s.%d.0" % (p, j), "%s.%d.1" % (p, j), x, 1, 0, 1), "%s.%d" % (p, j))
+            j += 1
+        x = act(a, conv_bn("%s.%d.0" % (p, j), "%s.%d.1" % (p, j), x, stride, k // 2, exp), "%s.%d" % (p, j))
+        j += 1
+        if se:
+            q = "%s.%d" % (p, j)
+            pooled = uid(q + ".pool")
+            writer.add_node("GlobalAveragePool", [x], [pooled])
+            s1 = act("RE", conv(q + ".fc1", sd[q + ".fc1.weight"], sd[q + ".fc1.bias"], pooled), q + ".fc1")
+            s2 = conv(q + ".fc2", sd[q + ".fc2.weight"], sd[q + ".fc2.bias"], s1)
+            gate = uid(q + ".gate")
+            writer.add_node("Hardsigmoid", [s2], [gate])
+            scaled = uid(q + ".scaled")
+            writer.add_node("Mul", [x, gate], [scaled])
+            x = scaled
+            j += 1
+        x = conv_bn("%s.%d.0" % (p, j), "%s.%d.1" % (p, j), x, 1, 0, 1)
+        if stride == 1 and cin == cout:
+            summed = uid(p + ".add")
+            writer.add_node("Add", [block_in, x], [summed])
+            x = summed
+    x = act("HS", conv_bn("features.12.0", "features.12.1", x, 1, 0, 1), "features.12")
+    pooled = uid("avgpool")
+    writer.add_node("GlobalAveragePool", [x], [pooled])
+    w0 = np.asarray(sd["classifier.0.weight"], dtype=np.float32)
+    h = act("HS", conv("classifier.0", w0.reshape(w0.shape[0], w0.shape[1], 1, 1), sd["classifier.0.bias"], pooled),
+            "classifier.0")
+    w3 = np.asarray(sd["classifier.3.weight"], dtype=np.float32)
+    conv("classifier.3", w3.reshape(w3.shape[0], w3.shape[1], 1, 1), sd["classifier.3.bias"], h, out="output")
+    writer.add_output("output", [1, n_classes, -1, -1])
+    return writer
+
+
+def verify_mobilenetv3(path, sd, bn_eps=1e-3, size=64, seed=0):
+    """Returns (graph_error, file_error): the exact fp32 graph against the plain network, and the written
+    file (with its fp16 weights) against the plain network. Errors are relative to max(|logit|, 1)."""
+    x = np.random.RandomState(seed).randn(3, size, size)
+    want = mobilenetv3_small_forward({k: np.asarray(v, dtype=np.float64) for k, v in sd.items()}, x, bn_eps)
+    span = max(float(np.max(np.abs(want))), 1.0)
+    exact = build_mobilenetv3_small(sd, fp16=False, bn_eps=bn_eps)
+    meta, tensors = read_vva(exact.to_bytes())
+    graph_err = float(np.max(np.abs(run_graph(meta, tensors, x).reshape(-1) - want))) / span
+    meta, stored = read_vva(path)
+    file_err = float(np.max(np.abs(run_graph(meta, stored, x).reshape(-1) - want))) / span
+    return graph_err, file_err
+
+
+def detect_architecture(sd):
+    if "conv_first.weight" in sd and any(k.startswith("body.") for k in sd):
+        return "rrdbnet"
+    if "features.0.0.weight" in sd and "classifier.3.weight" in sd:
+        return "mobilenet_v3_small"
+    raise ConversionError("unrecognised checkpoint: supported networks are the x4 RRDBNet (basicsr / Real-ESRGAN "
+                          "keys: conv_first, body.N.rdb1...) and torchvision MobileNetV3-Small classifiers "
+                          "(keys: features.N.block..., classifier.3)")
+
+
 def convert(input_path, output_path, fp16=True, name=None, author="", license="", lrelu_slope=0.2,
-            res_scale=0.2, verify=True, allow_pickle=False, log=print):
+            res_scale=0.2, verify=True, allow_pickle=False, log=print, classes=None, input_size=224,
+            mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), bn_eps=1e-3):
     sd = load_checkpoint(input_path, allow_pickle=allow_pickle)
     name = name or os.path.splitext(os.path.basename(output_path))[0]
+    if detect_architecture(sd) == "mobilenet_v3_small":
+        return _convert_classifier(sd, output_path, fp16, name, author, license, verify, log, classes, input_size,
+                                   mean, std, bn_eps)
     writer = build_rrdbnet(sd, name, fp16, lrelu_slope, res_scale, author, license)
     out_dir = os.path.dirname(os.path.abspath(output_path))
     os.makedirs(out_dir, exist_ok=True)
@@ -249,6 +423,27 @@ def convert(input_path, output_path, fp16=True, name=None, author="", license=""
             raise ConversionError("verification failed: the stored graph differs from the network (%.2e)" % graph_err)
         log("verified: graph matches the network (%.1e), fp16 storage error %.1e of the output range"
             % (graph_err, quant_err))
+    return output_path
+
+
+def _convert_classifier(sd, output_path, fp16, name, author, license, verify, log, classes, input_size, mean, std, bn_eps):
+    writer = build_mobilenetv3_small(sd, name, classes, input_size, mean, std, fp16, bn_eps, author, license)
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    try:
+        size = writer.save(output_path)
+    except VVAFormatError as exc:
+        raise ConversionError(str(exc))
+    n = inspect_mobilenetv3_small(sd)
+    log("converted: %s  (MobileNetV3-Small classifier, %d classes, input %dx%d, %.1f MB)"
+        % (output_path, n, input_size, input_size, size / 1e6))
+    log("preprocessing stored in the file: resize to %dx%d, mean=%s std=%s" % (input_size, input_size, list(mean), list(std)))
+    if verify:
+        graph_err, file_err = verify_mobilenetv3(output_path, sd, bn_eps)
+        if graph_err > 1e-5:
+            raise ConversionError("verification failed: the stored graph differs from the network (%.2e)" % graph_err)
+        if file_err > 0.05:
+            raise ConversionError("verification failed: fp16 weights change the logits too much (%.2e); use --fp32" % file_err)
+        log("verified: graph matches the network (%.1e), fp16 storage changes the logits by %.1e" % (graph_err, file_err))
     return output_path
 
 

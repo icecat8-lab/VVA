@@ -26,6 +26,14 @@ def conv2d(x, w, b=None, stride=(1, 1), padding=(0, 0), dilation=(1, 1), groups=
     wo = (wd + 2 * pw - dw * (kw - 1) - 1) // sw + 1
     xp = np.pad(x, ((0, 0), (ph, ph), (pw, pw)))
     out = np.zeros((out_c, ho, wo), dtype=np.float64)
+    if groups == x.shape[0] == out_c and ig == 1:  # depthwise: one filter per channel
+        for ky in range(kh):
+            for kx in range(kw):
+                patch = xp[:, ky * dh: ky * dh + sh * (ho - 1) + 1: sh, kx * dw: kx * dw + sw * (wo - 1) + 1: sw]
+                out += w[:, 0, ky, kx][:, None, None] * patch
+        if b is not None:
+            out += np.asarray(b, dtype=np.float64)[:, None, None]
+        return out
     og = out_c // groups
     for g in range(groups):
         xs = xp[g * ig:(g + 1) * ig]
@@ -42,6 +50,14 @@ def conv2d(x, w, b=None, stride=(1, 1), padding=(0, 0), dilation=(1, 1), groups=
 
 def leaky_relu(x, alpha):
     return np.where(x > 0, x, x * alpha)
+
+
+def hardswish(x):
+    return x * np.clip(x + 3.0, 0.0, 6.0) / 6.0
+
+
+def hardsigmoid(x):
+    return np.clip(x + 3.0, 0.0, 6.0) / 6.0
 
 
 def resize_nearest(x, sh, sw):
@@ -74,6 +90,12 @@ def run_graph(meta, tensors, x):
             out = np.maximum(a[0], 0.0)
         elif op == "Sigmoid":
             out = 1.0 / (1.0 + np.exp(-a[0]))
+        elif op == "Hardswish":
+            out = hardswish(a[0])
+        elif op == "Hardsigmoid":
+            out = hardsigmoid(a[0])
+        elif op == "GlobalAveragePool":
+            out = a[0].mean(axis=(1, 2), keepdims=True)
         elif op == "Clip":
             out = np.clip(a[0], attrs.get("min", -np.inf), attrs.get("max", np.inf))
         elif op == "Concat":
@@ -118,3 +140,53 @@ def rrdbnet_forward(sd, x, lrelu_slope=0.2, res_scale=0.2):
     feat = act(conv("conv_up1", resize_nearest(feat, 2, 2)))
     feat = act(conv("conv_up2", resize_nearest(feat, 2, 2)))
     return conv("conv_last", act(conv("conv_hr", feat)))
+
+
+# MobileNetV3-Small (torchvision layout): (in, kernel, expanded, out, squeeze-excite, activation, stride)
+MBV3_SMALL = [
+    (16, 3, 16, 16, True, "RE", 2), (16, 3, 72, 24, False, "RE", 2), (24, 3, 88, 24, False, "RE", 1),
+    (24, 5, 96, 40, True, "HS", 2), (40, 5, 240, 40, True, "HS", 1), (40, 5, 240, 40, True, "HS", 1),
+    (40, 5, 120, 48, True, "HS", 1), (48, 5, 144, 48, True, "HS", 1), (48, 5, 288, 96, True, "HS", 2),
+    (96, 5, 576, 96, True, "HS", 1), (96, 5, 576, 96, True, "HS", 1),
+]
+
+
+def mobilenetv3_small_forward(sd, x, bn_eps=1e-3):
+    """torchvision MobileNetV3-Small computed from its state dict, BatchNorm applied explicitly (no folding).
+    x is [3,H,W] (already normalised); returns the logits [classes]."""
+    def conv_bn(conv, bn, t, stride, pad, groups, act):
+        t = conv2d(t, sd[conv + ".weight"], None, (stride, stride), (pad, pad), (1, 1), groups)
+        g = np.asarray(sd[bn + ".weight"], dtype=np.float64)
+        beta = np.asarray(sd[bn + ".bias"], dtype=np.float64)
+        mean = np.asarray(sd[bn + ".running_mean"], dtype=np.float64)
+        var = np.asarray(sd[bn + ".running_var"], dtype=np.float64)
+        t = (t - mean[:, None, None]) / np.sqrt(var + bn_eps)[:, None, None] * g[:, None, None] + beta[:, None, None]
+        if act == "HS":
+            t = hardswish(t)
+        elif act == "RE":
+            t = np.maximum(t, 0.0)
+        return t
+
+    t = conv_bn("features.0.0", "features.0.1", np.asarray(x, dtype=np.float64), 2, 1, 1, "HS")
+    for i, (cin, k, exp, cout, se, act, stride) in enumerate(MBV3_SMALL, start=1):
+        p = "features.%d.block" % i
+        j = 0
+        inp = t
+        if exp != cin:
+            t = conv_bn("%s.%d.0" % (p, j), "%s.%d.1" % (p, j), t, 1, 0, 1, act)
+            j += 1
+        t = conv_bn("%s.%d.0" % (p, j), "%s.%d.1" % (p, j), t, stride, k // 2, exp, act)
+        j += 1
+        if se:
+            s = t.mean(axis=(1, 2), keepdims=True)
+            s = np.maximum(conv2d(s, sd["%s.%d.fc1.weight" % (p, j)], sd["%s.%d.fc1.bias" % (p, j)]), 0.0)
+            s = hardsigmoid(conv2d(s, sd["%s.%d.fc2.weight" % (p, j)], sd["%s.%d.fc2.bias" % (p, j)]))
+            t = t * s
+            j += 1
+        t = conv_bn("%s.%d.0" % (p, j), "%s.%d.1" % (p, j), t, 1, 0, 1, None)
+        if stride == 1 and cin == cout:
+            t = inp + t
+    t = conv_bn("features.12.0", "features.12.1", t, 1, 0, 1, "HS")
+    v = t.mean(axis=(1, 2))
+    v = hardswish(np.asarray(sd["classifier.0.weight"], dtype=np.float64) @ v + np.asarray(sd["classifier.0.bias"], dtype=np.float64))
+    return np.asarray(sd["classifier.3.weight"], dtype=np.float64) @ v + np.asarray(sd["classifier.3.bias"], dtype=np.float64)

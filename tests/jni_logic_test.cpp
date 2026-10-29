@@ -2,6 +2,7 @@
 // The JNI source is included directly; Android/JNI headers come from tests/stubs.
 //   jni_logic_test <rrdbnet.vva>
 #include <cstdio>
+#include <cmath>
 #include <cstdlib>
 
 #include "../android/vva-android/src/main/cpp/vva_jni.cpp"
@@ -16,6 +17,8 @@ jboolean JNIEnv::CallBooleanMethod(jobject, jmethodID, ...) { return 0; }
 jboolean JNIEnv::ExceptionCheck() { return 0; }
 void JNIEnv::ExceptionClear() {}
 void JNIEnv::DeleteLocalRef(jobject) {}
+jfloatArray JNIEnv::NewFloatArray(jsize) { return nullptr; }
+void JNIEnv::SetFloatArrayRegion(jfloatArray, jsize, jsize, const jfloat*) {}
 int AndroidBitmap_getInfo(JNIEnv*, jobject, AndroidBitmapInfo*) { return -1; }
 int AndroidBitmap_lockPixels(JNIEnv*, jobject, void**) { return -1; }
 int AndroidBitmap_unlockPixels(JNIEnv*, jobject) { return -1; }
@@ -35,7 +38,7 @@ static int g_checks = 0, g_failed = 0;
     } while (0)
 
 int main(int argc, char** argv) {
-    if (argc != 2) return 2;
+    if (argc != 2 && argc != 3) return 2;
     Handle h;
     CHECK(h.engine.loadModel(argv[1]), "model loads");
     const int s = h.engine.scale();
@@ -132,6 +135,42 @@ int main(int argc, char** argv) {
         Handle empty;
         std::vector<uint8_t> in(4, 0), out(16 * 4, 0);
         CHECK(!upscaleRgba(&empty, in.data(), 4, 1, 1, out.data(), 4, false, false) && empty.jniError == "no model loaded", "no model: clean failure");
+    }
+
+    // 6. classification through the JNI helper (row strides, premultiplied alpha).
+    if (argc == 3) {
+        Handle c;
+        CHECK(c.engine.loadModel(argv[2]) && c.engine.isClassifier(), "classifier loads");
+        const int cw = 23, ch = 17;
+        std::vector<uint8_t> img(static_cast<size_t>(cw) * ch * 4);
+        unsigned seed2 = 5;
+        for (size_t i = 0; i < img.size(); ++i) {
+            seed2 = seed2 * 1664525u + 1013904223u;
+            img[i] = static_cast<uint8_t>(seed2 >> 24);
+        }
+        for (int i = 0; i < cw * ch; ++i) img[i * 4 + 3] = (i % 4 == 0) ? 255 : static_cast<uint8_t>(140 + (i * 13) % 100);
+
+        vva::Classification direct;
+        CHECK(c.engine.classify(img.data(), cw, ch, direct), "direct classify");
+
+        const size_t stride = cw * 4 + 16;
+        std::vector<uint8_t> padded(stride * ch, 0xAB);
+        for (int y = 0; y < ch; ++y) std::memcpy(&padded[y * stride], &img[static_cast<size_t>(y) * cw * 4], cw * 4);
+        vva::Classification viaStride;
+        CHECK(classifyRgba(&c, padded.data(), stride, cw, ch, false, viaStride), "classify with padded rows");
+        CHECK(viaStride.logits == direct.logits, "row padding does not change the result");
+
+        std::vector<uint8_t> pre = img;
+        premultiply(pre.data(), static_cast<size_t>(cw) * ch);
+        vva::Classification viaPremul;
+        CHECK(classifyRgba(&c, pre.data(), cw * 4, cw, ch, true, viaPremul), "classify premultiplied");
+        float worst = 0.f;
+        for (size_t i = 0; i < direct.logits.size(); ++i) worst = std::max(worst, std::fabs(direct.logits[i] - viaPremul.logits[i]));
+        CHECK(worst < 0.5f * (std::fabs(direct.logits[0]) + std::fabs(direct.logits[1]) + 1.f), "premultiplied input gives nearly the same logits");
+
+        Handle none;
+        vva::Classification r;
+        CHECK(!classifyRgba(&none, img.data(), cw * 4, cw, ch, false, r), "no model: clean failure");
     }
 
     std::printf("jni_logic_test: %d checks, %d failed\n", g_checks, g_failed);

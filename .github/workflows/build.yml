@@ -25,7 +25,7 @@ jobs:
       - name: Host tests (real sources, ASan + UBSan, numpy reference)
         run: |
           python3 -m venv /tmp/venv
-          /tmp/venv/bin/pip install --quiet numpy
+          /tmp/venv/bin/pip install --quiet numpy pillow
           /tmp/venv/bin/python tests/test_format.py
           /tmp/venv/bin/python tests/test_converter.py
           /tmp/venv/bin/python tests/test_engine.py

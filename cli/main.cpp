@@ -21,7 +21,8 @@ void printUsage() {
         "  vva-cli --version                       show the version\n"
         "  vva-cli --info                          show Vulkan device information\n"
         "  vva-cli info <model.vva>                check a model and show its details\n"
-        "  vva-cli run <model.vva> <in.ppm> <out.ppm> [options]\n"
+        "  vva-cli run <model.vva> <in.ppm> <out.ppm> [options]   upscale with an image model\n"
+        "  vva-cli classify <model.vva> <in.ppm>                  classify an image with a classifier model\n"
         "\n"
         "Options for run:\n"
         "  --tile N      tile size in input pixels (default: automatic)\n"
@@ -158,8 +159,39 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "error: %s\n", engine.lastError().c_str());
             return 1;
         }
-        std::printf("model: %s\nscale: x%d\nstatus: OK (all operators supported)\n", engine.modelName().c_str(),
-                    engine.scale());
+        if (engine.isClassifier()) {
+            std::printf("model: %s\nkind: classifier (%zu named classes)\n", engine.modelName().c_str(),
+                        engine.classLabels().size());
+            for (const std::string& label : engine.classLabels()) std::printf("  class: %s\n", label.c_str());
+        } else {
+            std::printf("model: %s\nscale: x%d\n", engine.modelName().c_str(), engine.scale());
+        }
+        std::printf("status: OK (all operators supported)\n");
+        return 0;
+    }
+
+    if (std::strcmp(argv[1], "classify") == 0 && argc == 4) {
+        vva::Engine engine;
+        if (!engine.loadModel(argv[2])) {
+            std::fprintf(stderr, "error: %s\n", engine.lastError().c_str());
+            return 1;
+        }
+        std::vector<uint8_t> in;
+        int w = 0, h = 0;
+        std::string err;
+        if (!readPPM(argv[3], in, w, h, err)) {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        vva::Classification result;
+        if (!engine.classify(in.data(), w, h, result)) {
+            std::fprintf(stderr, "error: %s\n", engine.lastError().c_str());
+            return 1;
+        }
+        std::printf("class: %d (%s)\nconfidence: %.4f\n", result.index, result.label.c_str(), result.confidence);
+        for (size_t i = 0; i < result.probabilities.size(); ++i) {
+            std::printf("  [%zu] probability %.6f  logit %.6f\n", i, result.probabilities[i], result.logits[i]);
+        }
         return 0;
     }
 

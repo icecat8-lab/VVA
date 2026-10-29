@@ -3,6 +3,8 @@ package com.vva.engine;
 import android.graphics.Bitmap;
 import android.hardware.HardwareBuffer;
 
+import java.util.Arrays;
+
 /**
  * Super-resolution engine for {@code .vva} models.
  *
@@ -17,6 +19,10 @@ import android.hardware.HardwareBuffer;
  *     Bitmap big = engine.upscale(photo, fraction -&gt; !cancelled);
  * }
  * </pre>
+ *
+ * <p>Two kinds of model are supported: image models ({@link #upscale}) and classifiers
+ * ({@link #classify}), for example to choose between two upscaling models. {@link #isClassifier()}
+ * tells which kind was loaded.
  *
  * <p>Processing runs on the CPU with several threads. Large images are split into
  * tiles automatically so memory stays within {@link #setMemoryBudgetMb(int)}.
@@ -33,10 +39,30 @@ public final class VVAEngine implements AutoCloseable {
         boolean onProgress(float fraction);
     }
 
+    /** Result of {@link #classify}. */
+    public static final class Classification {
+        /** Most likely class. */
+        public final int index;
+        /** Its probability, 0..1. */
+        public final float confidence;
+        /** Class name from the model, or "class N" when the model has no names. */
+        public final String label;
+        /** One probability per class; they sum to 1. */
+        public final float[] probabilities;
+
+        Classification(int index, float confidence, String label, float[] probabilities) {
+            this.index = index;
+            this.confidence = confidence;
+            this.label = label;
+            this.probabilities = probabilities;
+        }
+    }
+
     private final Object runLock = new Object();     // one job / model load at a time
     private final Object handleLock = new Object();  // protects {@link #handle}
     private long handle;
     private volatile int scale;
+    private volatile boolean classifier;
     private volatile String javaError;
 
     public VVAEngine() {
@@ -58,6 +84,7 @@ public final class VVAEngine implements AutoCloseable {
             boolean ok = nativeInit(h, modelPath);
             if (ok) {
                 scale = nativeScale(h);
+                classifier = nativeIsClassifier(h);
             }
             return ok;
         }
@@ -66,6 +93,11 @@ public final class VVAEngine implements AutoCloseable {
     /** Upscale factor of the loaded model (for example 4), or 0 when no model is loaded. */
     public int getScale() {
         return scale;
+    }
+
+    /** True when the loaded model is a classifier (use {@link #classify}); false for image models. */
+    public boolean isClassifier() {
+        return classifier;
     }
 
     /** Human readable reason for the last failure. */
@@ -140,7 +172,7 @@ public final class VVAEngine implements AutoCloseable {
         }
         int factor = scale;
         if (factor <= 0) {
-            javaError = "no model loaded";
+            javaError = classifier ? "this model is a classifier; use classify()" : "no model loaded";
             return null;
         }
         Bitmap in = src;
@@ -181,6 +213,58 @@ public final class VVAEngine implements AutoCloseable {
             if (out != null) {
                 out.recycle();
             }
+            if (ownsIn) {
+                in.recycle();
+            }
+        }
+    }
+
+    /**
+     * Classifies a bitmap with a classifier model: the image is resized to the model's input size and
+     * normalised as stored in the model file. Returns {@code null} on failure (see {@link #getLastError()}).
+     * Any bitmap configuration is accepted. Call it from a background thread.
+     */
+    public Classification classify(Bitmap src) {
+        if (src == null) {
+            javaError = "bitmap is null";
+            return null;
+        }
+        if (!classifier) {
+            javaError = "the loaded model is not a classifier";
+            return null;
+        }
+        Bitmap in = src;
+        boolean ownsIn = false;
+        if (src.getConfig() != Bitmap.Config.ARGB_8888) {
+            try {
+                in = src.copy(Bitmap.Config.ARGB_8888, false);
+            } catch (OutOfMemoryError e) {
+                in = null;
+            }
+            if (in == null) {
+                javaError = "cannot convert the bitmap to ARGB_8888";
+                return null;
+            }
+            ownsIn = true;
+        }
+        try {
+            synchronized (runLock) {
+                long h = currentHandle();
+                if (h == 0) {
+                    javaError = "the engine is closed";
+                    return null;
+                }
+                javaError = null;
+                float[] r = nativeClassifyBitmap(h, in, in.isPremultiplied());
+                if (r == null || r.length < 3) {
+                    return null;
+                }
+                int index = (int) r[0];
+                String label = nativeClassLabel(h, index);
+                return new Classification(index, r[1], label == null ? "class " + index : label,
+                        Arrays.copyOfRange(r, 2, r.length));
+            }
+        } finally {
             if (ownsIn) {
                 in.recycle();
             }
@@ -266,6 +350,12 @@ public final class VVAEngine implements AutoCloseable {
     private static native String nativeLastError(long handle);
 
     private static native int nativeScale(long handle);
+
+    private static native boolean nativeIsClassifier(long handle);
+
+    private static native String nativeClassLabel(long handle, int index);
+
+    private static native float[] nativeClassifyBitmap(long handle, Bitmap bitmap, boolean premultiplied);
 
     private static native void nativeSetTileSize(long handle, int pixels);
 

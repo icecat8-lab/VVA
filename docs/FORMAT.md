@@ -60,6 +60,11 @@ that does not follow these rules.
 
 - `version` must be `2`.
 - `meta.scale` (optional, 1..64): the output/input size ratio for super-resolution models. Defaults to 1.
+- `meta.task` (optional): `"image"` (default, image in / image out) or `"classify"` (image in / class scores out).
+- Classifiers only: `meta.classes` (array of class names in output order), `meta.input_size` (the image is resized to
+  this square size, 8..4096, default 224), `meta.mean` and `meta.std` (three numbers each, std > 0; defaults are the
+  ImageNet values 0.485, 0.456, 0.406 and 0.229, 0.224, 0.225). The engine resizes with PIL-style antialiased
+  bilinear filtering, scales pixels to 0..1 and normalises with `(x - mean) / std`.
 - `inputs` / `outputs`: named graph endpoints, layout **NCHW**. `-1` marks a dynamic dimension.
 - `tensors`: constants stored in the data blob.
   - `dtype`: `"f32"` or `"f16"` (IEEE 754 little-endian).
@@ -84,11 +89,14 @@ v2 core set.
 |----|--------|------------|
 | `Conv2D` | `x`, `weight [O, I/groups, kh, kw]`, optional `bias [O]` | `stride [sh,sw]` (1,1), `padding [ph,pw]` (0,0, **zero padding**), `dilation [dh,dw]` (1,1), `groups` (1) |
 | `Add` | `a`, `b` (same shape) | - |
-| `Mul` | `a` and `b` (same shape), or `a` with `scalar` | `scalar` (float, optional) |
+| `Mul` | `a` and `b` (same shape, or `[C,H,W]` times `[C,1,1]` for channel scaling), or `a` with `scalar` | `scalar` (float, optional) |
 | `LeakyReLU` | `x` | `alpha` (0.01) |
 | `ReLU` | `x` | - |
 | `Sigmoid` | `x` | - |
 | `Clip` | `x` | `min`, `max` |
+| `Hardswish` | `x` | `x * relu6(x + 3) / 6` |
+| `Hardsigmoid` | `x` | `relu6(x + 3) / 6` |
+| `GlobalAveragePool` | `x` | mean over height and width, output `[C, 1, 1]` |
 | `Concat` | two or more tensors | `axis` (1) |
 | `ResizeNearest` | `x` | `scale [sh, sw]` (integers; nearest-neighbour like `torch.nn.functional.interpolate(mode="nearest")`) |
 | `PixelShuffle` | `x` | `upscale` (integer) |
@@ -114,7 +122,20 @@ runs when:
 Weights stored as `f16` are converted to float32 when the model is loaded; all
 arithmetic is float32.
 
+## Classifier models
+
+A model with `meta.task = "classify"` may declare a fixed input size and its output is not required to be an image
+(typically `[1, classes, 1, 1]` after `GlobalAveragePool` and 1x1 convolutions standing in for linear layers). Use
+`Engine::classify()` / `VVAEngine.classify()`; such a model cannot be used with `processImageTile`, and image models
+cannot be used with `classify`.
+
 ## Models produced by `vva-convert`
+
+`vva-convert` also writes torchvision **MobileNetV3-Small** classifiers (any number of classes): BatchNorm is folded
+into the convolutions, squeeze-and-excitation uses `GlobalAveragePool`, `Hardsigmoid` and a channel `Mul`, and the
+linear layers become 1x1 `Conv2D`. The resize size, normalisation and class names are stored in `meta`
+(`--input-size`, `--mean`, `--std`, `--classes`).
+
 
 `vva-convert` writes the x4 `RRDBNet` of basicsr / Real-ESRGAN completely:
 `conv_first`, `body.N.rdb{1,2,3}.conv{1..5}` (dense blocks with `Concat`, `LeakyReLU`

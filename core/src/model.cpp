@@ -218,6 +218,39 @@ bool Model::parse(const uint8_t* base, size_t size, std::string* error) {
             if (!asInt(s, scale) || scale < 1 || scale > 64) return fail(error, "'meta.scale' must be an integer in 1..64");
             scale_ = static_cast<int>(scale);
         }
+        if (const json::Value* t = meta->find("task")) {
+            if (!asString(t, task_) || (task_ != "image" && task_ != "classify")) {
+                return fail(error, "'meta.task' must be \"image\" or \"classify\"");
+            }
+        }
+        if (const json::Value* c = meta->find("classes")) {
+            if (!asStringArray(c, classes_) || classes_.empty() || classes_.size() > 4096) {
+                return fail(error, "'meta.classes' must be a non-empty array of strings");
+            }
+            for (const std::string& label : classes_) {
+                if (label.size() > 256) return fail(error, "'meta.classes' contains a label longer than 256 bytes");
+            }
+        }
+        if (const json::Value* sz = meta->find("input_size")) {
+            int64_t v = 0;
+            if (!asInt(sz, v) || v < 8 || v > 4096) return fail(error, "'meta.input_size' must be an integer in 8..4096");
+            inputSize_ = static_cast<int>(v);
+        }
+        for (int which = 0; which < 2; ++which) {
+            const char* key = which == 0 ? "mean" : "std";
+            const json::Value* arr = meta->find(key);
+            if (!arr) continue;
+            if (!arr->isArray() || arr->array.size() != 3) {
+                return fail(error, std::string("'meta.") + key + "' must be an array of three numbers");
+            }
+            for (int i = 0; i < 3; ++i) {
+                const json::Value& e = arr->array[static_cast<size_t>(i)];
+                if (!e.isNumber() || !std::isfinite(e.number) || (which == 1 && e.number <= 0.0)) {
+                    return fail(error, std::string("'meta.") + key + "' must hold finite numbers (std > 0)");
+                }
+                (which == 0 ? mean_ : std_)[i] = static_cast<float>(e.number);
+            }
+        }
     }
 
     if (!parseIoList(root.find("inputs"), "inputs", inputs_, error)) return false;

@@ -18,7 +18,7 @@ int main(int argc, char** argv) {
         std::printf("LOAD_ERROR: %s\n", err.c_str());
         return 1;
     }
-    std::unique_ptr<vva::Executor> exec = vva::Executor::create(*model, &err);
+    std::unique_ptr<vva::Executor> exec = vva::Executor::create(*model, &err, model->task() == "classify");
     if (!exec) {
         std::printf("PREPARE_ERROR: %s\n", err.c_str());
         return 1;
@@ -36,8 +36,12 @@ int main(int argc, char** argv) {
         std::printf("CHANNEL_ERROR: model expects %d channels\n", exec->inChannels());
         return 1;
     }
-    const size_t outN = static_cast<size_t>(exec->outChannels()) * h * exec->scale() * w * exec->scale();
-    std::vector<float> out(outN);
+    vva::Shape os;
+    if (!exec->outputShape(h, w, &os)) {
+        std::printf("SHAPE_ERROR: the model cannot run at %dx%d\n", h, w);
+        return 1;
+    }
+    std::vector<float> out(vva::numel(os));
     if (exec->run(in.data(), h, w, out.data(), threads, nullptr, &err) != vva::Executor::Status::Ok) {
         std::printf("RUN_ERROR: %s\n", err.c_str());
         return 1;
@@ -45,7 +49,7 @@ int main(int argc, char** argv) {
     f = std::fopen(argv[6], "wb");
     std::fwrite(out.data(), 4, out.size(), f);
     std::fclose(f);
-    std::printf("OK scale=%d out_channels=%d peak_bytes=%zu\n", exec->scale(), exec->outChannels(),
+    std::printf("OK scale=%d out_channels=%d out=%dx%d peak_bytes=%zu\n", exec->scale(), exec->outChannels(), os.h, os.w,
                 exec->estimatePeakBytes(h, w));
     return 0;
 }

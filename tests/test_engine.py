@@ -16,8 +16,8 @@ import time
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (ENV, ROOT, WORK, Checker, build_binaries, exec_run, make_rrdbnet_state, run, save_npz,  # noqa: E402
-                    VVAWriter, read_vva)
+from common import (ENV, ROOT, WORK, Checker, build_binaries, exec_run, make_mobilenetv3_small_state,  # noqa: E402
+                    make_rrdbnet_state, run, save_npz, VVAWriter, read_vva)
 
 from vva.converter import convert  # noqa: E402
 from vva.reference import rrdbnet_forward, run_graph  # noqa: E402
@@ -230,6 +230,120 @@ def hostile_models():
     T.check(crashes == 0, "40 corrupted model files: no crashes (%d)" % crashes)
 
 
+
+def softmax(v):
+    e = np.exp(v - np.max(v))
+    return e / e.sum()
+
+
+def classifier_tests():
+    """MobileNetV3-Small classifier: executor, resize (against PIL), CLI, error paths."""
+    try:
+        from PIL import Image
+    except ImportError:
+        T.check(False, "Pillow is required for the classifier tests (pip install pillow)")
+        return
+    from vva.converter import build_mobilenetv3_small
+
+    sd = make_mobilenetv3_small_state(3, seed=4)
+    mean, std = [0.5, 0.45, 0.4], [0.25, 0.2, 0.3]
+    writer = build_mobilenetv3_small(sd, "cls", ["photo", "anime", "other"], input_size=96, mean=mean, std=std)
+    path = os.path.join(WORK, "cls.vva")
+    writer.save(path)
+    meta, stored = read_vva(path)
+    deq = {k: np.asarray(v, dtype=np.float64) for k, v in stored.items()}
+
+    print("-- executor vs numpy graph (odd sizes, threads) --")
+    for size in (64, 100, 224):
+        x = np.random.RandomState(size).randn(3, size, size).astype(np.float32)
+        text, got = exec_run(EXE["exec_run"], path, x, 2)
+        want = run_graph(meta, deq, x.astype(np.float64)).reshape(-1)
+        T.check(got is not None and "out=1x1" in text, "classifier runs at %dx%d (%s)" % (size, size, text))
+        if got is not None:
+            err = float(np.max(np.abs(got - want))) / max(float(np.max(np.abs(want))), 1.0)
+            T.check(err < 3e-5, "%dx%d logits match numpy (rel err %.1e)" % (size, size, err))
+            _, got1 = exec_run(EXE["exec_run"], path, x, 1)
+            _, got5 = exec_run(EXE["exec_run"], path, x, 5)
+            T.check(got1 is not None and got5 is not None and np.array_equal(got1, got5), "%dx%d: threads do not change the result" % (size, size))
+
+    print("-- resize against PIL --")
+    resize_bin = os.path.join(WORK, "resize_test")
+    core = [os.path.join(ROOT, "core", "src", f) for f in ("model.cpp", "exec.cpp")]
+    r = run(["g++", "-std=c++17", "-g", "-O1", "-fsanitize=address,undefined", "-fno-sanitize-recover=undefined", "-DVVA_NO_VULKAN",
+             "-pthread", "-I", os.path.join(ROOT, "core", "include"), "-I", os.path.join(ROOT, "core", "src"),
+             os.path.join(ROOT, "tests", "resize_test.cpp")] + core + ["-o", resize_bin])
+    T.check(r.returncode == 0, "resize_test builds: " + r.stderr[-300:])
+    rng = np.random.RandomState(5)
+    if r.returncode == 0:
+        for (w, h, size) in ((500, 300, 224), (64, 48, 224), (224, 224, 224), (3, 5, 224), (301, 299, 224), (4000, 10, 224),
+                             (1, 1, 96), (1024, 768, 96)):
+            yy, xx = np.mgrid[0:h, 0:w]
+            img = np.stack([xx * 255.0 / max(w - 1, 1), yy * 255.0 / max(h - 1, 1), rng.rand(h, w) * 255], axis=-1)
+            arr = np.clip(img + rng.randn(h, w, 3) * 8, 0, 255).astype(np.uint8)
+            ppm = os.path.join(WORK, "rs.ppm")
+            Image.fromarray(arr).save(ppm)
+            want = np.asarray(Image.open(ppm).convert("RGB").resize((size, size), Image.Resampling.BILINEAR)).astype(int)
+            raw = os.path.join(WORK, "rs.rgb")
+            rr = run([resize_bin, ppm, str(size), raw], env=ENV)
+            got = np.fromfile(raw, dtype=np.uint8).reshape(size, size, 3).astype(int) if rr.returncode == 0 else None
+            T.check(got is not None, "%dx%d -> %d: resize runs (%s)" % (w, h, size, rr.stderr[-120:]))
+            if got is not None:
+                diff = np.abs(got - want)
+                T.check(diff.max() <= 1 and float(np.mean(diff == 0)) > 0.9,
+                        "%dx%d -> %d matches PIL (max diff %d, identical %.3f)" % (w, h, size, diff.max(), np.mean(diff == 0)))
+
+    print("-- vva-cli classify vs PIL + numpy pipeline --")
+    cli = EXE["vva-cli"]
+    arr = (np.random.RandomState(9).rand(77, 130, 3) * 255).astype(np.uint8)
+    arr[:, :60] = (arr[:, :60] * 0.4 + 120).astype(np.uint8)
+    ppm = os.path.join(WORK, "cls_in.ppm")
+    Image.fromarray(arr).save(ppm)
+    rr = run([cli, "classify", path, ppm], env=ENV)
+    T.check(rr.returncode == 0, "classify runs: " + (rr.stdout + rr.stderr)[-200:])
+    if rr.returncode == 0:
+        import re
+        logits = [float(m.group(1)) for m in re.finditer(r"logit (-?[0-9.]+)", rr.stdout)]
+        resized = np.asarray(Image.open(ppm).convert("RGB").resize((96, 96), Image.Resampling.BILINEAR)).astype(np.float64) / 255.0
+        x = ((resized - np.array(mean)) / np.array(std)).transpose(2, 0, 1)
+        want = run_graph(meta, deq, x).reshape(-1)
+        T.check(len(logits) == 3, "three logits are printed")
+        if len(logits) == 3:
+            err = float(np.max(np.abs(np.array(logits) - want))) / max(float(np.max(np.abs(want))), 1.0)
+            T.check(err < 5e-3, "logits match PIL + numpy (rel err %.1e)" % err)
+            label = ["photo", "anime", "other"][int(np.argmax(want))]
+            T.check(("(%s)" % label) in rr.stdout, "predicted label is %s" % label)
+            probs = [float(m.group(1)) for m in re.finditer(r"probability ([0-9.]+)", rr.stdout)]
+            T.check(abs(sum(probs) - 1.0) < 1e-4 and np.allclose(probs, softmax(np.array(logits)), atol=2e-5), "probabilities are the softmax of the logits")
+    ri = run([cli, "info", path], env=ENV)
+    T.check(ri.returncode == 0 and "classifier" in ri.stdout and "anime" in ri.stdout, "info lists the classes: " + ri.stdout.strip()[:120])
+
+    print("-- classifier error paths --")
+    out_ppm = os.path.join(WORK, "cls_out.ppm")
+    rr = run([cli, "run", path, ppm, out_ppm], env=ENV)
+    T.check(rr.returncode == 1 and "classifier" in rr.stderr, "upscaling with a classifier is refused: " + rr.stderr.strip()[:100])
+    sr_model = to_model(make_rrdbnet_state(4, 3, 1, seed=2), "cls_sr")
+    rr = run([cli, "classify", sr_model, ppm], env=ENV)
+    T.check(rr.returncode == 1 and "not a classifier" in rr.stderr, "classifying with an upscaler is refused: " + rr.stderr.strip()[:100])
+
+    def with_meta(**changes):
+        w = build_mobilenetv3_small(sd, "bad", ["photo", "anime", "other"], input_size=96)
+        w.meta_info.update(changes)
+        p = os.path.join(WORK, "bad_meta.vva")
+        w.save(p)
+        return run([cli, "info", p], env=ENV)
+
+    rb = with_meta(classes=["only", "two"])
+    T.check(rb.returncode == 1 and "classes" in rb.stderr, "wrong number of class names: " + rb.stderr.strip()[:100])
+    rb = with_meta(task="segment")
+    T.check(rb.returncode == 1 and "task" in rb.stderr, "unknown task: " + rb.stderr.strip()[:100])
+    rb = with_meta(input_size=3)
+    T.check(rb.returncode == 1 and "input_size" in rb.stderr, "input_size out of range: " + rb.stderr.strip()[:100])
+    rb = with_meta(std=[0.2, 0.0, 0.2])
+    T.check(rb.returncode == 1 and "std" in rb.stderr, "std of zero: " + rb.stderr.strip()[:100])
+    rb = with_meta(mean=[0.1, 0.2])
+    T.check(rb.returncode == 1 and "mean" in rb.stderr, "mean needs three numbers: " + rb.stderr.strip()[:100])
+
+
 def cli_tests(model, sd_deq):
     cli = EXE["vva-cli"]
     r = run([cli, "info", model], env=ENV)
@@ -305,6 +419,9 @@ def main():
     print("== hostile and corrupted models ==")
     hostile_models()
 
+    print("== classifier (MobileNetV3-Small) ==")
+    classifier_tests()
+
     print("== Engine API ==")
     sd = make_rrdbnet_state(8, 4, 2, seed=21)
     model = to_model(sd, "engine_model")
@@ -323,7 +440,8 @@ def main():
              os.path.join(ROOT, "tests", "jni_logic_test.cpp")] + core + ["-o", jni_bin])
     T.check(r.returncode == 0, "jni_logic_test builds: " + r.stderr[-300:])
     if r.returncode == 0:
-        r = run([jni_bin, model], env=ENV)
+        cls_model = os.path.join(WORK, "cls.vva")
+        r = run([jni_bin, model, cls_model], env=ENV)
         print(r.stdout.rstrip())
         T.check(r.returncode == 0, "jni_logic_test passes (exit %d) %s" % (r.returncode, r.stderr[-300:]))
 

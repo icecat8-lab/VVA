@@ -15,7 +15,7 @@ JAVA = os.path.join(ROOT, "android/vva-android/src/main/java/com/vva/engine/VVAE
 CPP = os.path.join(ROOT, "android/vva-android/src/main/cpp/vva_jni.cpp")
 
 JAVA_TO_JNI = {"long": "jlong", "int": "jint", "boolean": "jboolean", "float": "jfloat", "void": "void",
-               "String": "jstring"}
+               "String": "jstring", "float[]": "jfloatArray"}
 
 
 def jni_type(java_type):
@@ -26,7 +26,7 @@ def main():
     java = open(JAVA).read()
     cpp = open(CPP).read()
     declared = {}
-    for m in re.finditer(r"private\s+static\s+native\s+(\w+)\s+(\w+)\(([^)]*)\)\s*;", java):
+    for m in re.finditer(r"private\s+static\s+native\s+([\w\[\]]+)\s+(\w+)\(([^)]*)\)\s*;", java):
         ret, name, params = m.groups()
         types = [p.strip().split()[0] for p in params.split(",") if p.strip()]
         declared[name] = (jni_type(ret), [jni_type(t) for t in types])

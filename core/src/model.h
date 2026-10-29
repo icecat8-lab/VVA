@@ -52,6 +52,14 @@ public:
 
     const std::string& name() const { return name_; }
     int scale() const { return scale_; }  // 1 when the model does not declare one
+
+    // meta.task: "image" (default, image in / image out) or "classify" (image in / class scores out).
+    const std::string& task() const { return task_; }
+    // Classifier settings (meta.classes, meta.input_size, meta.mean, meta.std); defaults when absent.
+    const std::vector<std::string>& classes() const { return classes_; }
+    int inputSize() const { return inputSize_; }
+    const float* mean() const { return mean_; }
+    const float* stdDev() const { return std_; }
     const std::vector<IoInfo>& inputs() const { return inputs_; }
     const std::vector<IoInfo>& outputs() const { return outputs_; }
     const std::vector<TensorInfo>& tensors() const { return tensors_; }
@@ -76,6 +84,11 @@ private:
 
     std::string name_;
     int scale_ = 1;
+    std::string task_ = "image";
+    std::vector<std::string> classes_;
+    int inputSize_ = 224;
+    float mean_[3] = {0.485f, 0.456f, 0.406f};
+    float std_[3] = {0.229f, 0.224f, 0.225f};
     std::vector<IoInfo> inputs_;
     std::vector<IoInfo> outputs_;
     std::vector<TensorInfo> tensors_;

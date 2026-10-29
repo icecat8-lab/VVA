@@ -116,3 +116,54 @@ def exec_run(exe, model, x, threads=1):
     if r.returncode != 0:
         return text, None
     return text, np.fromfile(out, dtype=np.float32)
+
+
+def make_mobilenetv3_small_state(n_classes=2, seed=0, bn_eps=1e-3):
+    """Random but well-behaved torchvision MobileNetV3-Small weights (float32), BatchNorm statistics included."""
+    from vva.reference import MBV3_SMALL, mobilenetv3_small_forward
+    rng = np.random.RandomState(seed)
+    sd = {}
+
+    def conv(name, out_c, in_c, k, groups=1, bias=False):
+        fan = (in_c // groups) * k * k
+        sd[name + ".weight"] = (rng.randn(out_c, in_c // groups, k, k) * np.sqrt(2.0 / fan)).astype(np.float32)
+        if bias:
+            sd[name + ".bias"] = (rng.randn(out_c) * 0.05).astype(np.float32)
+
+    def bn(name, c):
+        sd[name + ".weight"] = rng.uniform(0.8, 1.2, c).astype(np.float32)
+        sd[name + ".bias"] = (rng.randn(c) * 0.1).astype(np.float32)
+        sd[name + ".running_mean"] = (rng.randn(c) * 0.1).astype(np.float32)
+        sd[name + ".running_var"] = rng.uniform(0.5, 2.0, c).astype(np.float32)
+        sd[name + ".num_batches_tracked"] = np.array(100.0, dtype=np.float32)
+
+    conv("features.0.0", 16, 3, 3)
+    bn("features.0.1", 16)
+    for i, (cin, k, exp, cout, se, _a, _s) in enumerate(MBV3_SMALL, start=1):
+        p = "features.%d.block" % i
+        j = 0
+        if exp != cin:
+            conv("%s.%d.0" % (p, j), exp, cin, 1)
+            bn("%s.%d.1" % (p, j), exp)
+            j += 1
+        conv("%s.%d.0" % (p, j), exp, exp, k, groups=exp)
+        bn("%s.%d.1" % (p, j), exp)
+        j += 1
+        if se:
+            sq = max(8, int(exp // 4 + 4) // 8 * 8)
+            conv("%s.%d.fc1" % (p, j), sq, exp, 1, bias=True)
+            conv("%s.%d.fc2" % (p, j), exp, sq, 1, bias=True)
+            j += 1
+        conv("%s.%d.0" % (p, j), cout, exp, 1)
+        bn("%s.%d.1" % (p, j), cout)
+    conv("features.12.0", 576, 96, 1)
+    bn("features.12.1", 576)
+    sd["classifier.0.weight"] = (rng.randn(1024, 576) * np.sqrt(2.0 / 576)).astype(np.float32)
+    sd["classifier.0.bias"] = (rng.randn(1024) * 0.05).astype(np.float32)
+    sd["classifier.3.weight"] = (rng.randn(n_classes, 1024) * np.sqrt(1.0 / 1024)).astype(np.float32)
+    sd["classifier.3.bias"] = (rng.randn(n_classes) * 0.1).astype(np.float32)
+    # Scale the final layer so the logits have a spread of about one (probabilities stay informative).
+    x = np.random.RandomState(seed + 1).randn(3, 64, 64)
+    probe = mobilenetv3_small_forward({k: np.asarray(v, dtype=np.float64) for k, v in sd.items()}, x, bn_eps)
+    sd["classifier.3.weight"] *= np.float32(1.5 / max(float(np.std(probe)), 1e-3))
+    return sd

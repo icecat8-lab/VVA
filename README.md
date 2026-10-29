@@ -5,7 +5,8 @@ A small super-resolution inference engine for Android. It runs `.vva` models
 tiles large images so memory stays bounded, and ships as an AAR for apps plus a
 command-line tool.
 
-* Runs the x4 **RRDBNet** of basicsr / Real-ESRGAN (and models trained with that code).
+* Runs the x4 **RRDBNet** of basicsr / Real-ESRGAN (and models trained with that code) and torchvision
+  **MobileNetV3-Small** image classifiers (for example to choose which upscaler to use).
 * **CPU only**, multi-threaded, float32 maths with fp16 weights on disk. No Vulkan or NNAPI
   is needed to process an image (Vulkan is only probed by `vva-cli --info`).
 * Android 8.0+ (API 26), arm64-v8a. A 16 KB-page-aligned `libvva_engine.so`, no `libc++_shared.so`.
@@ -31,6 +32,9 @@ vva-convert -i model.pth -o model.vva --name "my-model"
   network on a random image; it prints the numerical error and fails if they disagree.
 * Options: `--fp32` (no fp16 rounding), `--lrelu-slope`, `--res-scale` (defaults 0.2, as in basicsr),
   `--no-verify`.
+* Classifiers (MobileNetV3-Small): `vva-convert -i classifier.pth -o classifier.vva --classes photo,anime`.
+  Class names are in output order. The image is resized to `--input-size` (default 224) and normalised with
+  `--mean` / `--std` (defaults: ImageNet); these must match how the model was trained, and they are stored in the file.
 * Not supported (reported with a clear error): models with pixel-unshuffle (x2 / x1 variants),
   other architectures. The `.vva` is self-contained; there is no `.json` sidecar any more.
 
@@ -71,6 +75,14 @@ try (VVAEngine engine = new VVAEngine()) {
 }
 ```
 
+Choosing a model with a classifier (two engines, one per model file):
+
+```java
+VVAEngine.Classification c = classifier.classify(photo);      // null on failure, see getLastError()
+VVAEngine upscaler = c != null && c.label.equals("anime") ? animeEngine : photoEngine;
+Bitmap big = upscaler.upscale(photo, null);
+```
+
 Keep one `VVAEngine` for the lifetime of the screen instead of creating one per image.
 `engine.cancel()` can be called from any thread. Other entry points:
 `processBitmap(in, out, listener)` for your own output bitmap and
@@ -90,6 +102,7 @@ Notes
 ```bash
 vva-cli info model.vva                                  # check a model
 vva-cli run model.vva in.ppm out.ppm --threads 4        # upscale a P6 PPM image
+vva-cli classify classifier.vva in.ppm                  # class, confidence and logits of a classifier
 vva-cli --info                                          # Vulkan diagnostics
 ```
 
@@ -120,5 +133,16 @@ Not testable off-device and therefore **not verified here**: the Android build i
 (NDK / Gradle / AAR packaging), JNI calls into a real `Bitmap` / `HardwareBuffer`, and speed on a
 phone. Run the app once on a device before shipping.
 
+## Layout
+
+```
+core/            model reader (model.cpp), CPU executor (exec.cpp), engine (vva.cpp)
+android/         Gradle module + JNI (vva_jni.cpp) + Java API (VVAEngine.java)
+cli/             vva-cli
+python/          vva-convert, the .vva writer/reader, numpy reference implementation
+docs/FORMAT.md   the .vva format
+tests/           host tests
+experimental/    unfinished GPU / NPU code (not built)
+```
 
 License: see `LICENSE`.

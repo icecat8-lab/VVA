@@ -67,6 +67,13 @@ int main(int argc, char** argv) {
     CHECK(e.loadModel(argv[1]), "model loads");
     CHECK(e.modelLoaded() && e.scale() == 4 && e.modelName() == "test-model", "scale and name");
     CHECK(!e.loadModel(argv[2]) && e.modelLoaded() && e.scale() == 4, "a failed load keeps the old model");
+    CHECK(!e.isClassifier() && e.classLabels().empty(), "an upscaler is not a classifier");
+    {
+        vva::Classification c;
+        std::vector<uint8_t> px(4 * 4 * 4, 128);
+        CHECK(!e.classify(px.data(), 4, 4, c) && e.lastError() == "this model is not a classifier; use processImageTile()",
+              "classify() on an upscaler fails with an explanation");
+    }
 
     // Wider than the network's receptive field (~34 px) so that tiling really happens.
     const int W = 120, H = 20, S = 4;

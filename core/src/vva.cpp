@@ -8,6 +8,7 @@
 #include <new>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "exec.h"
 #include "model.h"
@@ -22,6 +23,93 @@ namespace {
 
 constexpr size_t kMiB = 1024u * 1024u;
 constexpr int kMaxImageSide = 1 << 16;
+
+// ---- PIL-style antialiased bilinear resize (what torchvision's Resize uses on PIL images) ----
+
+struct AxisTaps {
+    std::vector<int> first;   // first source index per output index
+    std::vector<int> count;   // number of taps per output index
+    std::vector<float> w;     // weights, `stride` entries per output index
+    int stride = 0;
+};
+
+AxisTaps bilinearTaps(int inSize, int outSize) {
+    AxisTaps t;
+    const double scale = static_cast<double>(inSize) / static_cast<double>(outSize);
+    const double filterScale = scale > 1.0 ? scale : 1.0;
+    const double support = filterScale;  // bilinear support is 1
+    t.stride = static_cast<int>(std::ceil(support)) * 2 + 1;
+    t.first.assign(static_cast<size_t>(outSize), 0);
+    t.count.assign(static_cast<size_t>(outSize), 0);
+    t.w.assign(static_cast<size_t>(outSize) * t.stride, 0.f);
+    for (int x = 0; x < outSize; ++x) {
+        const double center = (x + 0.5) * scale;
+        int xmin = static_cast<int>(center - support + 0.5);
+        if (xmin < 0) xmin = 0;
+        int xmax = static_cast<int>(center + support + 0.5);
+        if (xmax > inSize) xmax = inSize;
+        int n = xmax - xmin;
+        if (n > t.stride) n = t.stride;
+        double total = 0.0;
+        float* wk = &t.w[static_cast<size_t>(x) * t.stride];
+        for (int k = 0; k < n; ++k) {
+            double d = (k + xmin - center + 0.5) / filterScale;
+            if (d < 0) d = -d;
+            const double wv = d < 1.0 ? 1.0 - d : 0.0;
+            wk[k] = static_cast<float>(wv);
+            total += wv;
+        }
+        if (total != 0.0) {
+            for (int k = 0; k < n; ++k) wk[k] = static_cast<float>(wk[k] / total);
+        }
+        t.first[static_cast<size_t>(x)] = xmin;
+        t.count[static_cast<size_t>(x)] = n;
+    }
+    return t;
+}
+
+inline uint8_t roundToByte(float v) {
+    v += 0.5f;
+    if (!(v > 0.f)) return 0;
+    if (v >= 255.f) return 255;
+    return static_cast<uint8_t>(v);
+}
+
+// RGBA8 (w x h) -> RGB8 (size x size); the intermediate image is 8 bit, like PIL's two-pass resample.
+void resizeRgb8(const uint8_t* rgba, int w, int h, int size, std::vector<uint8_t>& out) {
+    const AxisTaps tx = bilinearTaps(w, size);
+    const AxisTaps ty = bilinearTaps(h, size);
+    std::vector<uint8_t> mid(static_cast<size_t>(h) * size * 3);
+    for (int y = 0; y < h; ++y) {
+        const uint8_t* row = rgba + static_cast<size_t>(y) * w * 4;
+        uint8_t* dst = &mid[static_cast<size_t>(y) * size * 3];
+        for (int x = 0; x < size; ++x) {
+            const float* wk = &tx.w[static_cast<size_t>(x) * tx.stride];
+            const int first = tx.first[static_cast<size_t>(x)], n = tx.count[static_cast<size_t>(x)];
+            float r = 0.f, g = 0.f, b = 0.f;
+            for (int k = 0; k < n; ++k) {
+                const uint8_t* px = row + static_cast<size_t>(first + k) * 4;
+                r += wk[k] * px[0];
+                g += wk[k] * px[1];
+                b += wk[k] * px[2];
+            }
+            dst[3 * x + 0] = roundToByte(r);
+            dst[3 * x + 1] = roundToByte(g);
+            dst[3 * x + 2] = roundToByte(b);
+        }
+    }
+    out.assign(static_cast<size_t>(size) * size * 3, 0);
+    for (int y = 0; y < size; ++y) {
+        const float* wk = &ty.w[static_cast<size_t>(y) * ty.stride];
+        const int first = ty.first[static_cast<size_t>(y)], n = ty.count[static_cast<size_t>(y)];
+        uint8_t* dst = &out[static_cast<size_t>(y) * size * 3];
+        for (int x = 0; x < size * 3; ++x) {
+            float acc = 0.f;
+            for (int k = 0; k < n; ++k) acc += wk[k] * mid[static_cast<size_t>(first + k) * size * 3 + x];
+            dst[x] = roundToByte(acc);
+        }
+    }
+}
 
 inline float clamp01(float v) {
     if (!(v > 0.f)) return 0.f;  // also maps NaN to 0
@@ -72,6 +160,8 @@ public:
     std::mutex runMutex;  // one job (or model load) at a time
     std::atomic<bool> cancelFlag{false};
 
+    int classifierSize = 0;  // square input size of a classifier model (0 for image models)
+
     int tileSize = 0;
     int tilePad = 16;
     int threads = 0;
@@ -111,9 +201,10 @@ public:
             setError(err);
             return false;
         }
+        const bool classifier = loaded->task() == "classify";
         std::unique_ptr<Executor> prepared;
         try {
-            prepared = Executor::create(*loaded, &err);
+            prepared = Executor::create(*loaded, &err, classifier);
         } catch (const std::bad_alloc&) {
             setError("out of memory while preparing the model");
             return false;
@@ -122,12 +213,33 @@ public:
             setError(err);
             return false;
         }
-        if (prepared->inChannels() != 3 || prepared->outChannels() != 3) {
+        int size = 0;
+        if (classifier) {
+            if (prepared->inChannels() != 3) {
+                setError("a classifier must take 3 input channels (RGB)");
+                return false;
+            }
+            if (prepared->fixedInputHeight() != prepared->fixedInputWidth()) {
+                setError("classifiers with a non-square fixed input are not supported");
+                return false;
+            }
+            size = prepared->fixedInputHeight() > 0 ? prepared->fixedInputHeight() : loaded->inputSize();
+            Shape out;
+            if (!prepared->outputShape(size, size, &out) || out.h != 1 || out.w != 1) {
+                setError("a classifier must end in one value per class (GlobalAveragePool or a 1x1 output)");
+                return false;
+            }
+            if (!loaded->classes().empty() && static_cast<int>(loaded->classes().size()) != out.c) {
+                setError("meta.classes does not match the number of outputs");
+                return false;
+            }
+        } else if (prepared->inChannels() != 3 || prepared->outChannels() != 3) {
             setError("the model must take 3 input channels and produce 3 output channels (RGB)");
             return false;
         }
         model = std::move(loaded);
         exec = std::move(prepared);
+        classifierSize = size;
         setError("");
         return true;
     }
@@ -156,6 +268,10 @@ public:
         }
         if (!exec) {
             setError("no model loaded");
+            return false;
+        }
+        if (classifierSize > 0) {
+            setError("this model is a classifier; use classify()");
             return false;
         }
         if (!in || !out || w < 1 || h < 1 || w > kMaxImageSide || h > kMaxImageSide) {
@@ -260,6 +376,73 @@ public:
         if (!opaque) upscaleAlpha(in, w, h, out, s);
         return true;
     }
+
+    bool classify(const uint8_t* in, int w, int h, Classification& result) {
+        std::unique_lock<std::mutex> lock(runMutex, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            setError("the engine is busy");
+            return false;
+        }
+        if (!exec) {
+            setError("no model loaded");
+            return false;
+        }
+        if (classifierSize <= 0) {
+            setError("this model is not a classifier; use processImageTile()");
+            return false;
+        }
+        if (!in || w < 1 || h < 1 || w > kMaxImageSide || h > kMaxImageSide) {
+            setError("invalid image (size must be 1.." + std::to_string(kMaxImageSide) + " pixels per side)");
+            return false;
+        }
+        cancelFlag.store(false);
+        usedDevice = DeviceType::CPU_NEON;
+        setError("");
+
+        const int size = classifierSize;
+        std::vector<uint8_t> rgb;
+        resizeRgb8(in, w, h, size, rgb);
+        const size_t plane = static_cast<size_t>(size) * size;
+        std::vector<float> input(plane * 3);
+        const float* mean = model->mean();
+        const float* sd = model->stdDev();
+        for (size_t i = 0; i < plane; ++i) {
+            for (int c = 0; c < 3; ++c) {
+                input[static_cast<size_t>(c) * plane + i] = (rgb[i * 3 + static_cast<size_t>(c)] * (1.0f / 255.0f) - mean[c]) / sd[c];
+            }
+        }
+
+        const int classes = exec->outChannels();
+        std::vector<float> logits(static_cast<size_t>(classes));
+        std::string err;
+        const Executor::Status st = exec->run(input.data(), size, size, logits.data(), effectiveThreads(), &cancelFlag, &err);
+        if (st != Executor::Status::Ok) {
+            setError(err.empty() ? "processing failed" : err);
+            return false;
+        }
+
+        float maxLogit = logits[0];
+        for (float v : logits) maxLogit = v > maxLogit ? v : maxLogit;
+        double total = 0.0;
+        std::vector<double> e(logits.size());
+        for (size_t i = 0; i < logits.size(); ++i) {
+            e[i] = std::exp(static_cast<double>(logits[i] - maxLogit));
+            total += e[i];
+        }
+        result = Classification();
+        result.logits = logits;
+        result.probabilities.resize(logits.size());
+        int best = 0;
+        for (size_t i = 0; i < logits.size(); ++i) {
+            result.probabilities[i] = static_cast<float>(e[i] / total);
+            if (result.probabilities[i] > result.probabilities[static_cast<size_t>(best)]) best = static_cast<int>(i);
+        }
+        result.index = best;
+        result.confidence = result.probabilities[static_cast<size_t>(best)];
+        const std::vector<std::string>& names = model->classes();
+        result.label = names.empty() ? "class " + std::to_string(best) : names[static_cast<size_t>(best)];
+        return true;
+    }
 };
 
 Engine::Engine() : pimpl(new Impl()) {}
@@ -278,6 +461,22 @@ std::string Engine::lastError() const { return pimpl->getError(); }
 bool Engine::modelLoaded() const { return pimpl->exec != nullptr; }
 std::string Engine::modelName() const { return pimpl->model ? pimpl->model->name() : std::string(); }
 int Engine::scale() const { return pimpl->exec ? pimpl->exec->scale() : 0; }
+bool Engine::isClassifier() const { return pimpl->exec != nullptr && pimpl->classifierSize > 0; }
+std::vector<std::string> Engine::classLabels() const {
+    return pimpl->model ? pimpl->model->classes() : std::vector<std::string>();
+}
+
+bool Engine::classify(const uint8_t* inRGBA, int w, int h, Classification& result) {
+    try {
+        return pimpl->classify(inRGBA, w, h, result);
+    } catch (const std::bad_alloc&) {
+        pimpl->setError("out of memory");
+        return false;
+    } catch (const std::exception& e) {
+        pimpl->setError(std::string("unexpected error: ") + e.what());
+        return false;
+    }
+}
 
 bool Engine::processImageTile(const uint8_t* inRGBA, int w, int h, uint8_t* outRGBA, DeviceType device) {
     try {

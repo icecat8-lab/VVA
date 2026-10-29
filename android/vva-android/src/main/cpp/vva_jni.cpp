@@ -190,6 +190,21 @@ bool upscaleRgba(Handle* h, const uint8_t* inPixels, size_t inStride, int w, int
     return true;
 }
 
+// Classification of an RGBA image; unpremultiplies first when the bitmap carries premultiplied alpha.
+bool classifyRgba(Handle* h, const uint8_t* pixels, size_t strideBytes, int w, int ht, bool premultiplied,
+                  vva::Classification& result) {
+    const bool convert = premultiplied && hasTranslucency(pixels, w, ht, strideBytes);
+    std::vector<uint8_t> packed;
+    const uint8_t* src = pixels;
+    if (strideBytes != static_cast<size_t>(w) * 4 || convert) {
+        packed.resize(static_cast<size_t>(w) * ht * 4);
+        copyRows(pixels, strideBytes, packed.data(), static_cast<size_t>(w) * 4, ht, static_cast<size_t>(w) * 4);
+        if (convert) unpremultiply(packed.data(), static_cast<size_t>(w) * ht);
+        src = packed.data();
+    }
+    return h->engine.classify(src, w, ht, result);
+}
+
 }  // namespace
 
 extern "C" {
@@ -240,6 +255,74 @@ JNIEXPORT jstring JNICALL Java_com_vva_engine_VVAEngine_nativeLastError(JNIEnv* 
     } catch (...) {
         return nullptr;
     }
+}
+
+JNIEXPORT jboolean JNICALL Java_com_vva_engine_VVAEngine_nativeIsClassifier(JNIEnv*, jclass, jlong handle) {
+    Handle* h = toHandle(handle);
+    return (h && h->engine.isClassifier()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL Java_com_vva_engine_VVAEngine_nativeClassLabel(JNIEnv* env, jclass, jlong handle, jint index) {
+    Handle* h = toHandle(handle);
+    if (!h) return nullptr;
+    try {
+        const std::vector<std::string> names = h->engine.classLabels();
+        const std::string label = (index >= 0 && static_cast<size_t>(index) < names.size())
+                                      ? names[static_cast<size_t>(index)]
+                                      : "class " + std::to_string(index);
+        return env->NewStringUTF(asciiSafe(label).c_str());
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+// Returns [index, confidence, probability_0, ..., probability_n-1], or null on failure.
+JNIEXPORT jfloatArray JNICALL Java_com_vva_engine_VVAEngine_nativeClassifyBitmap(JNIEnv* env, jclass, jlong handle,
+                                                                               jobject bitmap, jboolean premultiplied) {
+    Handle* h = toHandle(handle);
+    if (!h) return nullptr;
+    try {
+        h->jniError.clear();
+        if (!bitmap) {
+            h->jniError = "bitmap is null";
+            return nullptr;
+        }
+        AndroidBitmapInfo info;
+        std::memset(&info, 0, sizeof(info));
+        if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) {
+            h->jniError = "cannot read bitmap information";
+            return nullptr;
+        }
+        if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
+            h->jniError = "the bitmap must be ARGB_8888 (software, not HARDWARE)";
+            return nullptr;
+        }
+        BitmapLock lock(env, bitmap);
+        if (!lock.ok()) {
+            h->jniError = "cannot lock bitmap pixels";
+            return nullptr;
+        }
+        vva::Classification result;
+        if (!classifyRgba(h, lock.data(), info.stride, static_cast<int>(info.width), static_cast<int>(info.height),
+                          premultiplied != JNI_FALSE, result)) {
+            return nullptr;
+        }
+        std::vector<jfloat> values;
+        values.push_back(static_cast<jfloat>(result.index));
+        values.push_back(result.confidence);
+        values.insert(values.end(), result.probabilities.begin(), result.probabilities.end());
+        jfloatArray array = env->NewFloatArray(static_cast<jsize>(values.size()));
+        if (!array) return nullptr;  // OutOfMemoryError is pending
+        env->SetFloatArrayRegion(array, 0, static_cast<jsize>(values.size()), values.data());
+        return array;
+    } catch (const std::bad_alloc&) {
+        h->jniError = "out of memory";
+    } catch (const std::exception& e) {
+        h->jniError = e.what();
+    } catch (...) {
+        h->jniError = "unknown native error";
+    }
+    return nullptr;
 }
 
 JNIEXPORT jint JNICALL Java_com_vva_engine_VVAEngine_nativeScale(JNIEnv*, jclass, jlong handle) {

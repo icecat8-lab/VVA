@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace vva {
 
@@ -16,6 +17,15 @@ enum class DeviceType { CPU_NEON, GPU_VULKAN, NPU_NNAPI, AUTO };
 // Called after every finished tile with the overall progress in 0..1.
 // Return false to cancel the job.
 using ProgressCallback = std::function<bool(float fraction)>;
+
+// Result of Engine::classify().
+struct Classification {
+    int index = -1;                   // most likely class
+    float confidence = 0.f;           // its probability (softmax of the logits)
+    std::string label;                // meta.classes[index], or "class N" when the model has no names
+    std::vector<float> probabilities;  // one per class, sums to 1
+    std::vector<float> logits;         // raw network outputs
+};
 
 class Engine {
 public:
@@ -31,7 +41,9 @@ public:
     std::string lastError() const;
     bool modelLoaded() const;
     std::string modelName() const;
-    int scale() const;  // output size / input size, 0 when no model is loaded
+    int scale() const;  // output size / input size; 0 when no model is loaded or the model is a classifier
+    bool isClassifier() const;
+    std::vector<std::string> classLabels() const;  // empty when the model has no class names
 
     // Upscales an RGBA8 image (straight, non-premultiplied alpha, tightly packed
     // rows). `outRGBA` must hold (w*scale) * (h*scale) * 4 bytes. Large images
@@ -40,6 +52,11 @@ public:
     // opaque, is upscaled bilinearly. Blocks until done; call it from a worker
     // thread. Returns false on error or cancellation (see lastError()).
     bool processImageTile(const uint8_t* inRGBA, int w, int h, uint8_t* outRGBA, DeviceType device);
+
+    // Classifier models (meta.task = "classify"): resizes the image to the model's input size
+    // (PIL-style antialiased bilinear), normalises it with the model's mean/std and runs the network.
+    // RGBA8 with tightly packed rows; alpha is ignored. Returns false on error (see lastError()).
+    bool classify(const uint8_t* inRGBA, int w, int h, Classification& result);
 
     // Tuning. Set these before processing; they are not synchronised with a running job.
     void setTileSize(int pixels);        // 0 = choose automatically from the memory budget

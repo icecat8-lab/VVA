@@ -49,7 +49,7 @@ float halfToFloat(uint16_t h) {
 
 namespace {
 
-enum class Op { Conv, Add, Mul, MulScalar, LeakyReLU, ReLU, Sigmoid, Clip, Concat, Resize, PixelShuffle };
+enum class Op { Conv, Add, Mul, MulScalar, LeakyReLU, ReLU, Sigmoid, Clip, Hardswish, Hardsigmoid, GlobalPool, Concat, Resize, PixelShuffle };
 
 struct Step {
     Op op = Op::Add;
@@ -315,6 +315,22 @@ void runUnary(const Step& st, const float* a, float* d, size_t n, int threads) {
                 for (size_t i = b; i < e; ++i) d[i] = 1.f / (1.f + std::exp(-a[i]));
             });
             break;
+        case Op::Hardsigmoid:  // relu6(x + 3) / 6
+            forEachChunk(threads, n, [&](size_t b, size_t e) {
+                for (size_t i = b; i < e; ++i) {
+                    const float t = a[i] + 3.f;
+                    d[i] = (t < 0.f ? 0.f : (t > 6.f ? 6.f : t)) * (1.f / 6.f);
+                }
+            });
+            break;
+        case Op::Hardswish:  // x * relu6(x + 3) / 6
+            forEachChunk(threads, n, [&](size_t b, size_t e) {
+                for (size_t i = b; i < e; ++i) {
+                    const float t = a[i] + 3.f;
+                    d[i] = a[i] * (t < 0.f ? 0.f : (t > 6.f ? 6.f : t)) * (1.f / 6.f);
+                }
+            });
+            break;
         case Op::Clip: {
             const float lo = st.f0, hi = st.f1;
             forEachChunk(threads, n, [&](size_t b, size_t e) {
@@ -349,6 +365,27 @@ void runBinary(Op op, const float* a, const float* b, float* d, size_t n, int th
             for (size_t i = lo; i < hi; ++i) d[i] = a[i] * b[i];
         });
     }
+}
+
+// d[c][i] = full[c][i] * scale[c]   (squeeze-and-excitation style channel scaling)
+void runMulChannel(const float* full, const float* scale, float* d, int channels, size_t plane, int threads) {
+    parallelFor(threads, channels, [&](int c) {
+        const float k = scale[c];
+        const float* a = full + static_cast<size_t>(c) * plane;
+        float* o = d + static_cast<size_t>(c) * plane;
+        for (size_t i = 0; i < plane; ++i) o[i] = a[i] * k;
+    });
+}
+
+void runGlobalPool(const Buf& in, Buf& out, int threads) {
+    const int C = in.shape.c;
+    const size_t plane = static_cast<size_t>(in.shape.h) * in.shape.w;
+    parallelFor(threads, C, [&](int c) {
+        const float* a = in.data + static_cast<size_t>(c) * plane;
+        double sum = 0.0;
+        for (size_t i = 0; i < plane; ++i) sum += a[i];
+        out.mut[c] = static_cast<float>(sum / static_cast<double>(plane));
+    });
 }
 
 void runResize(const Step& st, const Buf& in, Buf& out, int threads) {
@@ -460,6 +497,7 @@ struct Executor::Impl {
     int numValues = 1;  // value 0 is the graph input
     int outputId = 0;
     int inC = 0, outC = 0, scale = 1;
+    int fixedH = 0, fixedW = 0;
     std::vector<int> lastUse;  // per value: last step index that reads it (steps.size() for the output)
     std::vector<int> defStep;  // per value: step that writes it (-1 for the input)
 
@@ -489,17 +527,30 @@ struct Executor::Impl {
                 case Op::Add:
                 case Op::Mul: {
                     const Shape& b = s[st.in[1]];
-                    if (a.c != b.c || a.h != b.h || a.w != b.w) {
+                    const bool same = a.c == b.c && a.h == b.h && a.w == b.w;
+                    if (same) {
+                        o = a;
+                    } else if (st.op == Op::Mul && b.c == a.c && b.h == 1 && b.w == 1) {
+                        o = a;  // channel scale in the second operand
+                    } else if (st.op == Op::Mul && a.c == b.c && a.h == 1 && a.w == 1) {
+                        o = b;  // channel scale in the first operand
+                    } else {
                         return failMsg(err, st.label + ": operands have different shapes");
                     }
-                    o = a;
                     break;
                 }
+                case Op::GlobalPool:
+                    o.c = a.c;
+                    o.h = 1;
+                    o.w = 1;
+                    break;
                 case Op::MulScalar:
                 case Op::LeakyReLU:
                 case Op::ReLU:
                 case Op::Sigmoid:
                 case Op::Clip:
+                case Op::Hardswish:
+                case Op::Hardsigmoid:
                     o = a;
                     break;
                 case Op::Concat: {
@@ -551,8 +602,21 @@ Executor::~Executor() = default;
 int Executor::inChannels() const { return impl_->inC; }
 int Executor::outChannels() const { return impl_->outC; }
 int Executor::scale() const { return impl_->scale; }
+int Executor::fixedInputHeight() const { return impl_->fixedH; }
+int Executor::fixedInputWidth() const { return impl_->fixedW; }
 
-std::unique_ptr<Executor> Executor::create(const Model& model, std::string* error) {
+bool Executor::outputShape(int h, int w, Shape* out) const {
+    Shape in;
+    in.c = impl_->inC;
+    in.h = h;
+    in.w = w;
+    std::vector<Shape> shapes;
+    if (!impl_->inferShapes(in, shapes, nullptr)) return false;
+    if (out) *out = shapes[impl_->outputId];
+    return true;
+}
+
+std::unique_ptr<Executor> Executor::create(const Model& model, std::string* error, bool allowAnyOutput) {
     if (model.inputs().size() != 1 || model.outputs().size() != 1) {
         failMsg(error, "only models with exactly one input and one output can be executed");
         return nullptr;
@@ -563,14 +627,23 @@ std::unique_ptr<Executor> Executor::create(const Model& model, std::string* erro
         failMsg(error, "model input must be NCHW with batch 1 and a fixed channel count, e.g. [1, 3, -1, -1]");
         return nullptr;
     }
-    if (input.shape[2] > 0 || input.shape[3] > 0) {
+    const bool fixedInput = input.shape[2] > 0 || input.shape[3] > 0;
+    if (fixedInput && !allowAnyOutput) {
         failMsg(error, "model input has a fixed size; export it with dynamic height and width ([1, C, -1, -1])");
+        return nullptr;
+    }
+    if (fixedInput && (input.shape[2] < 1 || input.shape[3] < 1 || input.shape[2] > 8192 || input.shape[3] > 8192)) {
+        failMsg(error, "model input size is invalid");
         return nullptr;
     }
 
     std::unique_ptr<Executor> exec(new Executor());
     Impl& im = *exec->impl_;
     im.inC = static_cast<int>(input.shape[1]);
+    if (fixedInput) {
+        im.fixedH = static_cast<int>(input.shape[2]);
+        im.fixedW = static_cast<int>(input.shape[3]);
+    }
 
     std::unordered_map<std::string, int> ids;
     ids[input.name] = 0;
@@ -679,7 +752,16 @@ std::unique_ptr<Executor> Executor::create(const Model& model, std::string* erro
                 failMsg(error, where + ": expects two inputs" + std::string(n.op == "Mul" ? " (or one input and a 'scalar' attribute)" : ""));
                 return nullptr;
             }
-        } else if (n.op == "LeakyReLU" || n.op == "ReLU" || n.op == "Sigmoid" || n.op == "Clip") {
+        } else if (n.op == "GlobalAveragePool") {
+            int a = 0;
+            if (n.inputs.size() != 1 || !valueOf(n.inputs[0], a)) {
+                failMsg(error, where + ": expects exactly one activation input");
+                return nullptr;
+            }
+            st.in = {a};
+            st.op = Op::GlobalPool;
+        } else if (n.op == "LeakyReLU" || n.op == "ReLU" || n.op == "Sigmoid" || n.op == "Clip" ||
+                   n.op == "Hardswish" || n.op == "Hardsigmoid") {
             int a = 0;
             if (n.inputs.size() != 1 || !valueOf(n.inputs[0], a)) {
                 failMsg(error, where + ": expects exactly one activation input");
@@ -697,6 +779,10 @@ std::unique_ptr<Executor> Executor::create(const Model& model, std::string* erro
                 st.op = Op::ReLU;
             } else if (n.op == "Sigmoid") {
                 st.op = Op::Sigmoid;
+            } else if (n.op == "Hardswish") {
+                st.op = Op::Hardswish;
+            } else if (n.op == "Hardsigmoid") {
+                st.op = Op::Hardsigmoid;
             } else {
                 st.op = Op::Clip;
                 st.f0 = -std::numeric_limits<float>::infinity();
@@ -790,8 +876,9 @@ std::unique_ptr<Executor> Executor::create(const Model& model, std::string* erro
     }
     for (int i = 0; i < numSteps; ++i) {
         Step& st = im.steps[i];
-        const bool elementwise = st.op == Op::Add || st.op == Op::Mul || st.op == Op::MulScalar ||
-                                 st.op == Op::LeakyReLU || st.op == Op::ReLU || st.op == Op::Sigmoid || st.op == Op::Clip;
+        const bool elementwise = st.op == Op::Add || st.op == Op::MulScalar || st.op == Op::LeakyReLU ||
+                                 st.op == Op::ReLU || st.op == Op::Sigmoid || st.op == Op::Clip ||
+                                 st.op == Op::Hardswish || st.op == Op::Hardsigmoid;
         if (elementwise) {
             for (size_t k = 0; k < st.in.size(); ++k) {
                 const int v = st.in[k];
@@ -810,6 +897,23 @@ std::unique_ptr<Executor> Executor::create(const Model& model, std::string* erro
             st.release.push_back(v);
         }
         if (st.out != im.outputId && im.lastUse[st.out] == i) st.release.push_back(st.out);
+    }
+
+    if (allowAnyOutput) {
+        // Non-image models: validate at the fixed size (or 224 x 224 when the input is dynamic).
+        Shape a;
+        a.c = im.inC;
+        a.h = im.fixedH > 0 ? im.fixedH : 224;
+        a.w = im.fixedW > 0 ? im.fixedW : 224;
+        std::vector<Shape> s1;
+        if (!im.inferShapes(a, s1, error)) return nullptr;
+        im.outC = s1[im.outputId].c;
+        im.scale = 0;
+        if (output.shape.size() != 4 || (output.shape[1] > 0 && output.shape[1] != im.outC)) {
+            failMsg(error, "declared output channels do not match the graph (" + std::to_string(im.outC) + ")");
+            return nullptr;
+        }
+        return exec;
     }
 
     // Shape checks on two different sizes: channels must line up and the output
@@ -878,6 +982,10 @@ Executor::Status Executor::run(const float* in, int h, int w, float* out, int th
         return Status::Error;
     }
     if (threads < 1) threads = 1;
+    if (im.fixedH > 0 && (h != im.fixedH || w != im.fixedW)) {
+        failMsg(error, "this model needs a " + std::to_string(im.fixedH) + "x" + std::to_string(im.fixedW) + " input");
+        return Status::Error;
+    }
     try {
         Shape inShape;
         inShape.c = im.inC;
@@ -929,14 +1037,31 @@ Executor::Status Executor::run(const float* in, int h, int w, float* out, int th
                     break;
                 }
                 case Op::Add:
-                case Op::Mul:
                     runBinary(st.op, inData(0), inData(1), dst.mut, n, threads);
+                    break;
+                case Op::Mul: {
+                    const Buf& x = vals[st.in[0]];
+                    const Buf& y = vals[st.in[1]];
+                    const bool same = x.shape.h == y.shape.h && x.shape.w == y.shape.w;
+                    if (same) {
+                        runBinary(st.op, x.data, y.data, dst.mut, n, threads);
+                    } else if (y.shape.h == 1 && y.shape.w == 1) {
+                        runMulChannel(x.data, y.data, dst.mut, os.c, static_cast<size_t>(os.h) * os.w, threads);
+                    } else {
+                        runMulChannel(y.data, x.data, dst.mut, os.c, static_cast<size_t>(os.h) * os.w, threads);
+                    }
+                    break;
+                }
+                case Op::GlobalPool:
+                    runGlobalPool(vals[st.in[0]], dst, threads);
                     break;
                 case Op::MulScalar:
                 case Op::LeakyReLU:
                 case Op::ReLU:
                 case Op::Sigmoid:
                 case Op::Clip:
+                case Op::Hardswish:
+                case Op::Hardsigmoid:
                     runUnary(st, inData(0), dst.mut, n, threads);
                     break;
                 case Op::Concat: {
