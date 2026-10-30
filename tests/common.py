@@ -79,7 +79,7 @@ def build_binaries(sanitize=True):
              "-I", os.path.join(ROOT, "core", "include"), "-I", os.path.join(ROOT, "core", "src")]
     if sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"]
-    core = [os.path.join(ROOT, "core", "src", f) for f in ("vva.cpp", "model.cpp", "exec.cpp")]
+    core = [os.path.join(ROOT, "core", "src", f) for f in ("vva.cpp", "model.cpp", "exec.cpp", "gpu/gpu_plan.cpp", "gpu/gpu_vulkan.cpp")]
     objs = []
     for src in core:
         obj = os.path.join(WORK, os.path.basename(src) + (".san.o" if sanitize else ".o"))

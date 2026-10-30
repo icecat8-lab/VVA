@@ -1,7 +1,14 @@
 #include "vva/vva.h"
 
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <ctime>
+#include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -11,6 +18,7 @@
 #include <vector>
 
 #include "exec.h"
+#include "gpu/gpu_backend.h"
 #include "model.h"
 
 #ifndef VVA_NO_VULKAN
@@ -169,6 +177,10 @@ public:
     ProgressCallback progress;
     DeviceType usedDevice = DeviceType::CPU_NEON;
 
+    std::unique_ptr<gpu::Backend> gpuBackend;
+    std::string gpuState = "no model loaded";
+    bool gpuNeedsSpeedCheck = true;
+
 #ifndef VVA_NO_VULKAN
     VulkanContext vkContext;
     std::once_flag vkOnce;
@@ -237,24 +249,166 @@ public:
             setError("the model must take 3 input channels and produce 3 output channels (RGB)");
             return false;
         }
+        gpuBackend.reset();  // it points into the previous model
         model = std::move(loaded);
         exec = std::move(prepared);
         classifierSize = size;
+        if (classifier) {
+            gpuState = "classifiers run on the CPU";
+        } else {
+            initGpu(path);
+        }
         setError("");
         return true;
     }
 
+    // ---- GPU --------------------------------------------------------------------------------------
+
+    static double now() {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    static void fillProbe(std::vector<float>& v, unsigned seed) {
+        for (float& x : v) {
+            seed = seed * 1664525u + 1013904223u;
+            x = static_cast<float>(seed >> 8) * (1.0f / 16777216.0f);
+        }
+    }
+
+    // Runs the backend against the CPU executor. Returns an empty string on success, otherwise the reason.
+    std::string verifyBackend(bool checkSpeed, std::string* detail) {
+        const int ch = exec->inChannels();
+        const int h1 = 20, w1 = 24;
+        std::vector<float> in(static_cast<size_t>(ch) * h1 * w1);
+        fillProbe(in, 7);
+        Shape os;
+        if (!exec->outputShape(h1, w1, &os)) return "the model cannot run the test image";
+        const size_t outN = numel(os);
+        std::vector<float> cpu(outN), gpuOut(outN);
+        std::string err;
+        const double t0 = now();
+        if (exec->run(in.data(), h1, w1, cpu.data(), effectiveThreads(), nullptr, &err) != Executor::Status::Ok) {
+            return "the CPU reference run failed: " + err;
+        }
+        const double cpuSeconds = now() - t0;
+        if (gpuBackend->run(in.data(), h1, w1, gpuOut.data(), nullptr, &err) != gpu::Backend::Status::Ok) {
+            return "the GPU test run failed: " + err;
+        }
+        double worst = 0.0, range = 1.0;
+        for (size_t i = 0; i < outN; ++i) {
+            range = std::max(range, static_cast<double>(std::fabs(cpu[i])));
+            const double d = std::fabs(static_cast<double>(cpu[i]) - static_cast<double>(gpuOut[i]));
+            if (!(d <= worst)) worst = d;  // NaN counts as the worst case
+        }
+        const double error = worst / range;
+        if (!(error <= 2e-3)) return "the GPU test gave wrong results (error " + std::to_string(error) + ")";
+        if (!checkSpeed) {
+            *detail = "self-test passed";
+            return std::string();
+        }
+        // Speed: pixels per second on a larger probe for the GPU against the CPU's rate from the run above.
+        const int h2 = 40, w2 = 40;
+        std::vector<float> in2(static_cast<size_t>(ch) * h2 * w2);
+        fillProbe(in2, 11);
+        Shape os2;
+        if (!exec->outputShape(h2, w2, &os2)) return "the model cannot run the speed test image";
+        std::vector<float> out2(numel(os2));
+        if (gpuBackend->run(in2.data(), h2, w2, out2.data(), nullptr, &err) != gpu::Backend::Status::Ok) {  // warm-up
+            return "the GPU speed test failed: " + err;
+        }
+        const double t1 = now();
+        if (gpuBackend->run(in2.data(), h2, w2, out2.data(), nullptr, &err) != gpu::Backend::Status::Ok) {
+            return "the GPU speed test failed: " + err;
+        }
+        const double gpuSeconds = now() - t1;
+        const double cpuRate = (static_cast<double>(h1) * w1) / std::max(cpuSeconds, 1e-6);
+        const double gpuRate = (static_cast<double>(h2) * w2) / std::max(gpuSeconds, 1e-6);
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "GPU %.0f px/s, CPU %.0f px/s", gpuRate, cpuRate);
+        *detail = buf;
+        if (gpuRate < 1.3 * cpuRate) return std::string("the GPU is not faster than the CPU on this device (") + buf + ")";
+        return std::string();
+    }
+
+    void finishGpuSetup(bool checkSpeed) {
+        std::string detail;
+        const std::string problem = verifyBackend(checkSpeed, &detail);
+        if (!problem.empty()) {
+            gpuBackend.reset();
+            gpuState = problem;
+        } else {
+            gpuState = "active (" + detail + ")";
+        }
+    }
+
+    void initGpu(const std::string& modelPath) {
+        gpuState = "not available";
+        if (std::getenv("VVA_DISABLE_GPU")) {
+            gpuState = "disabled by the VVA_DISABLE_GPU environment variable";
+            return;
+        }
+#ifdef VVA_NO_VULKAN
+        gpuState = "this build has no Vulkan support";
+        (void)modelPath;
+#else
+        // A marker file guards against drivers that crash during the start-up test: if the previous test never
+        // finished, the GPU stays off (the marker expires after a day, or can be deleted).
+        const std::string marker = modelPath + ".gpuprobe";
+        struct stat st;
+        if (::stat(marker.c_str(), &st) == 0) {
+            const double age = std::difftime(std::time(nullptr), st.st_mtime);
+            if (age >= 0 && age < 24.0 * 3600.0) {
+                gpuState = "skipped: an earlier GPU test did not finish (delete " + marker + " to try again)";
+                return;
+            }
+        }
+        std::FILE* f = std::fopen(marker.c_str(), "wb");
+        if (!f) {
+            gpuState = "skipped: cannot write " + marker;
+            return;
+        }
+        std::fputs("vva gpu probe\n", f);
+        std::fclose(f);
+
+        std::call_once(vkOnce, [this]() { vkContext.init(); });
+        if (!vkContext.ready()) {
+            gpuState = "Vulkan is not available on this device";
+        } else {
+            gpu::VulkanHandles handles;
+            handles.physicalDevice = vkContext.physicalDevice;
+            handles.device = vkContext.device;
+            handles.queue = vkContext.computeQueue;
+            handles.queueFamily = vkContext.queueFamilyIndex;
+            std::string why;
+            gpuBackend = gpu::createVulkanBackend(handles, *model, &why);
+            if (!gpuBackend) {
+                gpuState = why;
+            } else {
+                finishGpuSetup(true);
+            }
+        }
+        ::unlink(marker.c_str());
+#endif
+    }
+
     // Largest tile (in input pixels) whose working set fits in the budget.
-    int chooseTile(int w, int h, int pad) const {
+    int chooseTile(int w, int h, int pad, bool useGpu) const {
         const size_t budget = static_cast<size_t>(std::max(budgetMB, 16)) * kMiB;
         const int longest = std::max(w, h);
-        if (exec->estimatePeakBytes(h, w) <= budget) return longest;
+        auto fitsBudget = [&](int ph, int pw) {
+            if (useGpu) {
+                const size_t bytes = gpuBackend->estimateBytes(ph, pw);
+                return bytes > 0 && bytes <= budget;
+            }
+            return exec->estimatePeakBytes(ph, pw) <= budget;
+        };
+        if (fitsBudget(h, w)) return longest;
         static const int kCandidates[] = {512, 384, 256, 192, 160, 128, 96, 80, 64, 48, 32};
         for (int t : kCandidates) {
             if (t >= longest) continue;
             const int rw = std::min(w, t + 2 * pad);
             const int rh = std::min(h, t + 2 * pad);
-            if (exec->estimatePeakBytes(rh, rw) <= budget) return t;
+            if (fitsBudget(rh, rw)) return t;
         }
         return 32;
     }
@@ -288,7 +442,13 @@ public:
         setError("");
 
         const int pad = std::max(0, std::min(tilePad, 128));
-        int tile = tileSize > 0 ? std::max(tileSize, 16) : chooseTile(w, h, pad);
+        bool useGpu = gpuBackend != nullptr && device != DeviceType::CPU_NEON;
+        if (device == DeviceType::GPU_VULKAN && !useGpu) {
+            setError("the GPU is not available: " + gpuState);
+            return false;
+        }
+        bool gpuFellBack = false;
+        int tile = tileSize > 0 ? std::max(tileSize, 16) : chooseTile(w, h, pad, useGpu);
         if (tile >= std::max(w, h)) tile = std::max(w, h);
         const int nx = (w + tile - 1) / tile;
         const int ny = (h + tile - 1) / tile;
@@ -331,7 +491,23 @@ public:
                 }
 
                 std::string err;
-                const Executor::Status st = exec->run(tileIn.get(), rh, rw, tileOut.get(), nthreads, &cancelFlag, &err);
+                Executor::Status st = Executor::Status::Ok;
+                if (useGpu) {
+                    const gpu::Backend::Status gs = gpuBackend->run(tileIn.get(), rh, rw, tileOut.get(), &cancelFlag, &err);
+                    if (gs == gpu::Backend::Status::Cancelled) {
+                        setError("cancelled");
+                        return false;
+                    }
+                    if (gs != gpu::Backend::Status::Ok) {
+                        // Never fail the job because of the GPU: switch to the CPU for this and every later tile.
+                        gpuState = "stopped after an error: " + err;
+                        gpuBackend.reset();
+                        useGpu = false;
+                        gpuFellBack = true;
+                        err.clear();
+                    }
+                }
+                if (!useGpu) st = exec->run(tileIn.get(), rh, rw, tileOut.get(), nthreads, &cancelFlag, &err);
                 if (st != Executor::Status::Ok) {
                     setError(err.empty() ? "processing failed" : err);
                     return false;
@@ -374,6 +550,7 @@ public:
             }
         }
         if (!opaque) upscaleAlpha(in, w, h, out, s);
+        usedDevice = (useGpu && !gpuFellBack) ? DeviceType::GPU_VULKAN : DeviceType::CPU_NEON;
         return true;
     }
 
@@ -497,6 +674,18 @@ void Engine::setMemoryBudgetMB(int mb) { pimpl->budgetMB = std::max(16, mb); }
 void Engine::setProgressCallback(ProgressCallback cb) { pimpl->progress = std::move(cb); }
 void Engine::cancel() { pimpl->cancelFlag.store(true); }
 DeviceType Engine::lastDevice() const { return pimpl->usedDevice; }
+std::string Engine::gpuStatus() const { return pimpl->gpuState; }
+bool Engine::gpuActive() const { return pimpl->gpuBackend != nullptr; }
+
+void Engine::adoptGpuBackendForTesting(gpu::Backend* backend, bool checkSpeed) {
+    std::lock_guard<std::mutex> lock(pimpl->runMutex);
+    pimpl->gpuBackend.reset(backend);
+    if (!pimpl->exec || !backend) {
+        pimpl->gpuState = "no model or backend";
+        return;
+    }
+    pimpl->finishGpuSetup(checkSpeed);
+}
 
 bool Engine::hasVulkan() const {
 #ifdef VVA_NO_VULKAN

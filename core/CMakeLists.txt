@@ -2,7 +2,9 @@ set(VVA_CORE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(VVA_CORE_SOURCES
     ${VVA_CORE_DIR}/src/vva.cpp
     ${VVA_CORE_DIR}/src/model.cpp
-    ${VVA_CORE_DIR}/src/exec.cpp)
+    ${VVA_CORE_DIR}/src/exec.cpp
+    ${VVA_CORE_DIR}/src/gpu/gpu_plan.cpp
+    ${VVA_CORE_DIR}/src/gpu/gpu_vulkan.cpp)
 set(VVA_CORE_SOURCES ${VVA_CORE_SOURCES} PARENT_SCOPE)
 
 function(vva_configure target)

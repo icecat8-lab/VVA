@@ -1,0 +1,32 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 16, local_size_y = 4, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer InBuf { float src[]; };
+layout(std430, set = 0, binding = 2) buffer OutBuf { float dst[]; };
+
+layout(push_constant) uniform Params {
+    int i0;
+    int i1;
+    int i2;
+    int i3;
+    int i4;
+    int i5;
+    int i6;
+    int i7;
+    float f0;
+    float f1;
+} p;
+
+#define P_H p.i0
+#define P_W p.i1
+#define P_SH p.i2
+#define P_SW p.i3
+#define P_PLANEIN p.i4
+#define P_PLANEOUT p.i5
+
+#include "kernel_common.inc"
+
+void main() {
+#include "kernel_resize.inc"
+}

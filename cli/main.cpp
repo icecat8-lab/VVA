@@ -29,6 +29,7 @@ void printUsage() {
         "  --pad N       overlap around each tile (default 16)\n"
         "  --threads N   worker threads (default: automatic, up to 8)\n"
         "  --budget MB   working memory per tile (default 320)\n"
+        "  --device D    auto (default), cpu or gpu\n"
         "\n"
         "Images are binary PPM (P6, 8 bit). Convert from/to PNG or JPEG with any\n"
         "tool, e.g.  ffmpeg -i in.png in.ppm   /   ffmpeg -i out.ppm out.png\n",
@@ -165,6 +166,7 @@ int main(int argc, char** argv) {
             for (const std::string& label : engine.classLabels()) std::printf("  class: %s\n", label.c_str());
         } else {
             std::printf("model: %s\nscale: x%d\n", engine.modelName().c_str(), engine.scale());
+            std::printf("gpu: %s\n", engine.gpuStatus().c_str());
         }
         std::printf("status: OK (all operators supported)\n");
         return 0;
@@ -197,7 +199,19 @@ int main(int argc, char** argv) {
 
     if (std::strcmp(argv[1], "run") == 0 && argc >= 5) {
         int tile = 0, pad = 16, threads = 0, budget = 320;
+        vva::DeviceType device = vva::DeviceType::AUTO;
         for (int i = 5; i < argc; ++i) {
+            if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
+                const std::string d = argv[++i];
+                if (d == "cpu") device = vva::DeviceType::CPU_NEON;
+                else if (d == "gpu") device = vva::DeviceType::GPU_VULKAN;
+                else if (d == "auto") device = vva::DeviceType::AUTO;
+                else {
+                    std::fprintf(stderr, "--device must be auto, cpu or gpu\n");
+                    return 1;
+                }
+                continue;
+            }
             if (parseIntOption(argc, argv, i, "--tile", tile) || parseIntOption(argc, argv, i, "--pad", pad) ||
                 parseIntOption(argc, argv, i, "--threads", threads) || parseIntOption(argc, argv, i, "--budget", budget)) {
                 continue;
@@ -238,7 +252,7 @@ int main(int argc, char** argv) {
         });
 
         const auto t0 = std::chrono::steady_clock::now();
-        const bool ok = engine.processImageTile(in.data(), w, h, out.data(), vva::DeviceType::AUTO);
+        const bool ok = engine.processImageTile(in.data(), w, h, out.data(), device);
         std::fprintf(stderr, "\n");
         if (!ok) {
             std::fprintf(stderr, "error: %s\n", engine.lastError().c_str());
@@ -249,7 +263,11 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "error: %s\n", err.c_str());
             return 1;
         }
-        std::printf("%dx%d -> %dx%d in %.2f s\n", w, h, w * s, h * s, secs);
+        std::printf("%dx%d -> %dx%d in %.2f s on the %s\n", w, h, w * s, h * s, secs,
+                    engine.lastDevice() == vva::DeviceType::GPU_VULKAN ? "GPU" : "CPU");
+        if (engine.lastDevice() != vva::DeviceType::GPU_VULKAN && device != vva::DeviceType::CPU_NEON) {
+            std::printf("gpu: %s\n", engine.gpuStatus().c_str());
+        }
         return 0;
     }
 

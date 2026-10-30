@@ -7,11 +7,23 @@ runs them on the CPU. Large images are processed in tiles so memory use stays bo
 The project provides an Android library (AAR), a command-line tool, and a converter for PyTorch
 checkpoints.
 
+## Supported models
+
+| Kind | Architecture | Use |
+|------|--------------|-----|
+| Upscaler | x4 RRDBNet (basicsr / Real-ESRGAN layout) | `upscale()` |
+| Classifier | torchvision MobileNetV3-Small | `classify()`, for example to pick an upscaler |
+
+Other architectures are rejected by the converter with an explanation of what is missing.
+
 ## Limitations
 
-* Processing runs on the CPU only. There is no GPU or NPU backend yet, so large models are slow:
-  on a mid-range phone, the 6-block RRDBNet used for testing needs about 15 seconds to turn a
-  128x192 image into 512x768 with 8 threads. Measure on your own target device.
+* The CPU path works everywhere. On a mid-range phone, the 6-block RRDBNet used for testing needs about
+  15 seconds to turn a 128x192 image into 512x768 with 8 threads. Measure on your own target device.
+* A Vulkan GPU path exists for RRDBNet-style graphs (3x3 convolutions, LeakyReLU, residual adds, concat,
+  nearest resize; channel counts must be multiples of 8). It is verified on the host against the CPU, but it
+  has not been verified on real hardware yet, so it checks itself before use (see "GPU" below). There is no NPU
+  backend.
 * The Android build is arm64-v8a only and requires Android 8.0 (API 26) or newer.
 
 ## Converting a model
@@ -79,6 +91,23 @@ Notes:
 * `processBitmap()` writes into a bitmap you supply, and `processZeroCopy()` works with
   `HardwareBuffer` objects (RGBA_8888, with CPU read/write usage flags).
 
+## GPU
+
+When a model is loaded, the engine tests the GPU path once: it runs a small image on both the GPU and the CPU,
+compares the results and compares the speed. The GPU is used only if the results agree and it is clearly faster.
+If a driver crashes during that test, a marker file (`<model>.gpuprobe`) keeps the GPU off on the next start.
+If the GPU fails while a job is running, the job finishes on the CPU instead of failing.
+
+```java
+engine.setDevice(VVAEngine.DEVICE_AUTO);   // default; DEVICE_CPU forces the CPU, DEVICE_GPU requires the GPU
+Log.i("VVA", engine.getGpuStatus());       // why the GPU is or is not active
+Log.i("VVA", "last job ran on " + (engine.getLastDevice() == VVAEngine.DEVICE_GPU ? "GPU" : "CPU"));
+```
+
+On the command line, `vva-cli info model.vva` prints the GPU status and `vva-cli run ... --device cpu|gpu|auto`
+chooses the device. Set `VVA_DISABLE_GPU=1` to turn the GPU path off. The GPU kernels are compiled with the NDK's
+`glslc` during the release build; a build without them runs on the CPU only.
+
 ## Command-line tool
 
 `vva-cli` runs the same engine from Termux, `adb shell` or a Linux machine:
@@ -108,14 +137,28 @@ The host tests need `g++`, `numpy` and `pillow`:
 python3 tests/test_format.py
 python3 tests/test_converter.py
 python3 tests/test_engine.py
+python3 tests/test_gpu_plan.py
 python3 tests/check_jni.py
 ```
 
 They compile the real C++ sources with AddressSanitizer and UBSan and compare every operator, the
 converter output and the classifier pipeline against independent numpy and PIL implementations.
 
-Not covered by these tests: the Android build itself and calls into a real `Bitmap` or
-`HardwareBuffer` on a device. Test the library inside an app before shipping it.
+The GPU kernels are the same source files that become shaders; the tests compile them as C++ and replay the
+planned GPU program on the host. Not covered by these tests: the Vulkan calls themselves, the Android build, and
+calls into a real `Bitmap` or `HardwareBuffer` on a device. Test the library inside an app before shipping it.
+
+## Repository layout
+
+```
+core/          model reader, CPU executor, engine
+android/       Gradle module, JNI bridge, Java API
+cli/           command-line tool
+python/        converter, .vva reader and writer, numpy reference
+docs/FORMAT.md description of the .vva format
+tests/         host tests
+experimental/  unfinished GPU and NPU code (not built)
+```
 
 ## License
 

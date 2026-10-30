@@ -29,6 +29,7 @@ jobs:
           /tmp/venv/bin/python tests/test_format.py
           /tmp/venv/bin/python tests/test_converter.py
           /tmp/venv/bin/python tests/test_engine.py
+          /tmp/venv/bin/python tests/test_gpu_plan.py
           /tmp/venv/bin/python tests/check_jni.py
 
       - name: Set up JDK 17
@@ -42,15 +43,21 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Build AAR
-        run: gradle :vva-android:assembleRelease --no-daemon --stacktrace
-
       - name: Locate NDK
         run: |
           SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
           NDK="$SDK/ndk/$NDK_VERSION"
           test -d "$NDK" || { echo "::error::NDK not found at $NDK"; exit 1; }
           echo "NDK=$NDK" >> "$GITHUB_ENV"
+
+      - name: Compile GPU kernels (optional)
+        continue-on-error: true
+        run: |
+          python3 tools/gen_spirv.py --glslc "$NDK/shader-tools/linux-x86_64/glslc" \
+            || { echo "::warning::GPU kernels were not built; the library will run on the CPU only"; rm -f core/src/gpu/spirv_data.h; }
+
+      - name: Build AAR
+        run: gradle :vva-android:assembleRelease --no-daemon --stacktrace
 
       - name: Build native SDK (libvva.so and vva-cli)
         run: |

@@ -34,6 +34,13 @@ public final class VVAEngine implements AutoCloseable {
         System.loadLibrary("vva_engine");
     }
 
+    /** Choose the GPU when it passed its self-test and is faster, otherwise the CPU (the default). */
+    public static final int DEVICE_AUTO = 0;
+    /** Always use the CPU. */
+    public static final int DEVICE_CPU = 1;
+    /** Require the GPU; processing fails when it is unavailable. */
+    public static final int DEVICE_GPU = 2;
+
     /** Receives progress after every tile. Return {@code false} to cancel the job. */
     public interface ProgressListener {
         boolean onProgress(float fraction);
@@ -93,6 +100,29 @@ public final class VVAEngine implements AutoCloseable {
     /** Upscale factor of the loaded model (for example 4), or 0 when no model is loaded. */
     public int getScale() {
         return scale;
+    }
+
+    /** Selects where image models run: {@link #DEVICE_AUTO}, {@link #DEVICE_CPU} or {@link #DEVICE_GPU}. */
+    public void setDevice(int device) {
+        synchronized (handleLock) {
+            if (handle != 0) nativeSetDevice(handle, device);
+        }
+    }
+
+    /** {@link #DEVICE_CPU} or {@link #DEVICE_GPU}: where the last job ran (CPU when it had to fall back). */
+    public int getLastDevice() {
+        synchronized (handleLock) {
+            return handle == 0 ? DEVICE_CPU : nativeLastDevice(handle);
+        }
+    }
+
+    /** One line explaining whether the GPU is active for the loaded model and why not otherwise. */
+    public String getGpuStatus() {
+        synchronized (handleLock) {
+            if (handle == 0) return "the engine is closed";
+            String s = nativeGpuStatus(handle);
+            return s == null ? "" : s;
+        }
     }
 
     /** True when the loaded model is a classifier (use {@link #classify}); false for image models. */
@@ -352,6 +382,12 @@ public final class VVAEngine implements AutoCloseable {
     private static native int nativeScale(long handle);
 
     private static native boolean nativeIsClassifier(long handle);
+
+    private static native void nativeSetDevice(long handle, int device);
+
+    private static native int nativeLastDevice(long handle);
+
+    private static native String nativeGpuStatus(long handle);
 
     private static native String nativeClassLabel(long handle, int index);
 

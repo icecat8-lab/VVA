@@ -9,9 +9,16 @@
 
 namespace vva {
 
-// Where the work runs. Today every request is executed by the multi-threaded
-// CPU executor: AUTO and CPU_NEON are the supported values, GPU_VULKAN and
-// NPU_NNAPI are accepted but fall back to the CPU (see Engine::lastDevice()).
+namespace gpu {
+class Backend;
+}
+
+// Where the work runs.
+//   AUTO        the GPU (Vulkan) when it passed its start-up self-test and is faster than the CPU, otherwise the CPU
+//   CPU_NEON    the multi-threaded CPU executor
+//   GPU_VULKAN  the GPU; processing fails when the GPU path is unavailable (see Engine::gpuStatus())
+//   NPU_NNAPI   not implemented: treated like AUTO
+// A GPU error in the middle of a job never fails the job: the remaining work continues on the CPU.
 enum class DeviceType { CPU_NEON, GPU_VULKAN, NPU_NNAPI, AUTO };
 
 // Called after every finished tile with the overall progress in 0..1.
@@ -68,8 +75,15 @@ public:
     // May be called from any thread; stops the running job as soon as possible.
     void cancel();
 
-    // Device that executed the last job.
+    // Device that executed the last job (CPU_NEON when any part of it had to fall back to the CPU).
     DeviceType lastDevice() const;
+
+    // Why the GPU path is or is not active for the loaded model, in one line.
+    std::string gpuStatus() const;
+    bool gpuActive() const;
+
+    // Internal: lets tests inject a backend. Takes ownership. `checkSpeed` = false skips the speed comparison.
+    void adoptGpuBackendForTesting(gpu::Backend* backend, bool checkSpeed);
 
     // Vulkan diagnostics (probed on first use; never needed for processing).
     bool hasVulkan() const;

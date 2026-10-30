@@ -21,6 +21,7 @@ namespace {
 
 struct Handle {
     vva::Engine engine;
+    vva::DeviceType device = vva::DeviceType::AUTO;
     std::string jniError;  // errors detected by this layer (bad bitmap format, size mismatch, ...)
 };
 
@@ -181,7 +182,7 @@ bool upscaleRgba(Handle* h, const uint8_t* inPixels, size_t inStride, int w, int
         dst = packedOut.data();
     }
 
-    if (!h->engine.processImageTile(src, w, ht, dst, vva::DeviceType::AUTO)) return false;
+    if (!h->engine.processImageTile(src, w, ht, dst, h->device)) return false;
 
     if (!tightOut) {
         if (convertOut) premultiply(packedOut.data(), outW * outH);
@@ -323,6 +324,28 @@ JNIEXPORT jfloatArray JNICALL Java_com_vva_engine_VVAEngine_nativeClassifyBitmap
         h->jniError = "unknown native error";
     }
     return nullptr;
+}
+
+// device: 0 = auto, 1 = CPU, 2 = GPU
+JNIEXPORT void JNICALL Java_com_vva_engine_VVAEngine_nativeSetDevice(JNIEnv*, jclass, jlong handle, jint device) {
+    if (Handle* h = toHandle(handle)) {
+        h->device = device == 1 ? vva::DeviceType::CPU_NEON : (device == 2 ? vva::DeviceType::GPU_VULKAN : vva::DeviceType::AUTO);
+    }
+}
+
+JNIEXPORT jint JNICALL Java_com_vva_engine_VVAEngine_nativeLastDevice(JNIEnv*, jclass, jlong handle) {
+    Handle* h = toHandle(handle);
+    return (h && h->engine.lastDevice() == vva::DeviceType::GPU_VULKAN) ? 2 : 1;
+}
+
+JNIEXPORT jstring JNICALL Java_com_vva_engine_VVAEngine_nativeGpuStatus(JNIEnv* env, jclass, jlong handle) {
+    Handle* h = toHandle(handle);
+    if (!h) return nullptr;
+    try {
+        return env->NewStringUTF(asciiSafe(h->engine.gpuStatus()).c_str());
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 JNIEXPORT jint JNICALL Java_com_vva_engine_VVAEngine_nativeScale(JNIEnv*, jclass, jlong handle) {
