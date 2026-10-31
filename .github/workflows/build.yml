@@ -43,10 +43,17 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Locate NDK
+      - name: Install and locate NDK
         run: |
           SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
           NDK="$SDK/ndk/$NDK_VERSION"
+          if [ ! -d "$NDK" ]; then
+            SDKM="$(ls "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)"
+            test -n "$SDKM" || { echo "::error::sdkmanager not found under $SDK"; exit 1; }
+            set +o pipefail
+            yes | "$SDKM" --install "ndk;$NDK_VERSION" > /dev/null
+            set -o pipefail
+          fi
           test -d "$NDK" || { echo "::error::NDK not found at $NDK"; exit 1; }
           echo "NDK=$NDK" >> "$GITHUB_ENV"
 
