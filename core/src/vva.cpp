@@ -159,6 +159,12 @@ void upscaleAlpha(const uint8_t* in, int w, int h, uint8_t* out, int s) {
 
 class Engine::Impl {
 public:
+    ~Impl() {
+        // The GPU backend uses the Vulkan device owned by vkContext, which is declared later and would be
+        // destroyed first. Tear the backend down while the device still exists.
+        gpuBackend.reset();
+    }
+
     std::unique_ptr<Model> model;
     std::unique_ptr<Executor> exec;
 
