@@ -22,13 +22,14 @@ void printUsage() {
         "  vva-cli --info                          show Vulkan device information\n"
         "  vva-cli info <model.vva>                check a model and show its details\n"
         "  vva-cli run <model.vva> <in.ppm> <out.ppm> [options]   upscale with an image model\n"
+        "  vva-cli profile <model.vva> [size]                     where the GPU time goes (tile of size x size, default 128)\n"
         "  vva-cli classify <model.vva> <in.ppm>                  classify an image with a classifier model\n"
         "\n"
         "Options for run:\n"
         "  --tile N      tile size in input pixels (default: automatic)\n"
         "  --pad N       overlap around each tile (default 16)\n"
         "  --threads N   worker threads (default: automatic, up to 8)\n"
-        "  --budget MB   working memory per tile (default 320)\n"
+        "  --budget MB   working memory per tile (default: automatic from free RAM)\n"
         "  --device D    auto (default), cpu or gpu\n"
         "\n"
         "Images are binary PPM (P6, 8 bit). Convert from/to PNG or JPEG with any\n"
@@ -172,6 +173,18 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (std::strcmp(argv[1], "profile") == 0 && (argc == 3 || argc == 4)) {
+        vva::Engine engine;
+        if (!engine.loadModel(argv[2])) {
+            std::fprintf(stderr, "error: %s\n", engine.lastError().c_str());
+            return 1;
+        }
+        const int size = argc == 4 ? std::atoi(argv[3]) : 128;
+        std::printf("gpu: %s\n", engine.gpuStatus().c_str());
+        std::printf("%s", engine.gpuProfile(size, size).c_str());
+        return 0;
+    }
+
     if (std::strcmp(argv[1], "classify") == 0 && argc == 4) {
         vva::Engine engine;
         if (!engine.loadModel(argv[2])) {
@@ -198,7 +211,7 @@ int main(int argc, char** argv) {
     }
 
     if (std::strcmp(argv[1], "run") == 0 && argc >= 5) {
-        int tile = 0, pad = 16, threads = 0, budget = 320;
+        int tile = 0, pad = 16, threads = 0, budget = 0;
         vva::DeviceType device = vva::DeviceType::AUTO;
         for (int i = 5; i < argc; ++i) {
             if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
@@ -244,7 +257,7 @@ int main(int argc, char** argv) {
         engine.setTileSize(tile);
         engine.setTilePad(pad);
         engine.setThreads(threads);
-        engine.setMemoryBudgetMB(budget);
+        if (budget > 0) engine.setMemoryBudgetMB(budget);
         engine.setProgressCallback([](float p) {
             std::fprintf(stderr, "\r%3d%%", static_cast<int>(p * 100.f + 0.5f));
             std::fflush(stderr);

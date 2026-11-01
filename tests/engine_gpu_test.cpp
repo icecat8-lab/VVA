@@ -64,16 +64,22 @@ public:
         }
         return Status::Ok;
     }
+    std::string describe() const override { return "emulated"; }
+    std::string profile(int, int) override { return "emulated profile\n"; }
     int inChannels() const override { return plan_->inChannels(); }
     int outChannels() const override { return plan_->outChannels(); }
 
     int calls = 0;
+    ~EmuBackend() override { ++destroyed; }
+    static int destroyed;
 
 private:
     std::unique_ptr<vva::gpu::Plan> plan_;
     vva::gpu::Emulator emu_;
     Mode mode_;
 };
+
+int EmuBackend::destroyed = 0;
 
 static std::vector<uint8_t> makeImage(int w, int h) {
     std::vector<uint8_t> img(static_cast<size_t>(w) * h * 4);
@@ -222,6 +228,35 @@ int main(int argc, char** argv) {
         e.setProgressCallback(nullptr);
         CHECK(e.processImageTile(in.data(), W, H, got.data(), kAuto) && maxDiff(got, want) <= 1, "usable after a cancel");
         CHECK(e.gpuActive(), "a cancel does not disable the GPU");
+    }
+
+    {  // The profile and status texts come from the backend.
+        vva::Engine e;
+        e.loadModel(argv[1]);
+        attach(e, *model, Mode());
+        CHECK(e.gpuStatus().find("emulated") != std::string::npos, "the status includes the device description");
+        CHECK(e.gpuProfile(8, 8) == "emulated profile\n", "gpuProfile asks the backend");
+        vva::Engine none;
+        none.loadModel(argv[1]);
+        CHECK(none.gpuProfile(8, 8).find("not active") != std::string::npos, "gpuProfile explains when the GPU is off");
+    }
+
+    {  // Destroying an engine tears its GPU backend down (it must happen before the Vulkan device goes away).
+        const int before = EmuBackend::destroyed;
+        {
+            vva::Engine e;
+            e.loadModel(argv[1]);
+            attach(e, *model, Mode());
+            CHECK(e.gpuActive(), "backend adopted");
+        }
+        CHECK(EmuBackend::destroyed == before + 1, "the backend is destroyed together with the engine");
+        {
+            vva::Engine e;  // a backend that was dropped after a failure must not be destroyed twice
+            e.loadModel(argv[1]);
+            Mode m;
+            m.failOnCall = 2;
+            attach(e, *model, m);
+        }
     }
 
     std::printf("engine_gpu_test: %d checks, %d failed\n", g_checks, g_failed);

@@ -87,7 +87,8 @@ Notes:
 * `init`, `upscale` and `classify` block, so never call them on the UI thread.
 * Create one engine per model and keep it for the lifetime of the screen.
 * `cancel()` may be called from any thread.
-* `setMemoryBudgetMb()`, `setThreads()` and `setTileSize()` adjust memory use and speed.
+* `setMemoryBudgetMb()`, `setThreads()` and `setTileSize()` adjust memory use and speed. The memory budget is chosen
+  automatically from the free RAM (320 to 768 MB); bigger tiles mean less repeated work at tile borders.
 * `processBitmap()` writes into a bitmap you supply, and `processZeroCopy()` works with
   `HardwareBuffer` objects (RGBA_8888, with CPU read/write usage flags).
 
@@ -116,6 +117,7 @@ chooses the device. Set `VVA_DISABLE_GPU=1` to turn the GPU path off. The GPU ke
 vva-cli info model.vva                              # check a model
 vva-cli run model.vva in.ppm out.ppm --threads 8    # upscale an image
 vva-cli classify classifier.vva in.ppm              # classify an image
+vva-cli profile model.vva 128                       # where the GPU time goes (diagnostic)
 ```
 
 Images use the PPM format so the tool needs no extra libraries. Convert with

@@ -162,7 +162,7 @@ public final class VVAEngine implements AutoCloseable {
         }
     }
 
-    /** Working memory for one tile in MB (default 320). Lower it on devices with little RAM. */
+    /** Working memory for one tile in MB. By default it is chosen from the free RAM (320 to 768 MB); lower it on devices with little RAM. */
     public void setMemoryBudgetMb(int megabytes) {
         synchronized (handleLock) {
             if (handle != 0) nativeSetMemoryBudgetMb(handle, megabytes);

@@ -31,6 +31,10 @@ public:
     virtual size_t estimateBytes(int h, int w) = 0;
     // in: planar float [inChannels][h][w]; out: planar float [outChannels][h*scale][w*scale].
     virtual Status run(const float* in, int h, int w, float* out, const std::atomic<bool>* cancel, std::string* error) = 0;
+    // One line about the device and its limits (for status messages).
+    virtual std::string describe() const = 0;
+    // Runs an h x w image with one submit per command and reports where the time goes. Diagnostic only.
+    virtual std::string profile(int h, int w) = 0;
     virtual int inChannels() const = 0;
     virtual int outChannels() const = 0;
 };

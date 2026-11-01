@@ -119,6 +119,33 @@ void resizeRgb8(const uint8_t* rgba, int w, int h, int size, std::vector<uint8_t
     }
 }
 
+// Memory available for activations when the caller does not set a budget. Bigger tiles mean less overlapping
+// work (measured: 320 -> 512 MB made a 256x384 upscale 18% faster), so use a share of the free RAM.
+long parseMemAvailableKb(const std::string& text) {
+    const std::string key = "MemAvailable:";
+    const size_t pos = text.find(key);
+    if (pos == std::string::npos) return -1;
+    const long v = std::strtol(text.c_str() + pos + key.size(), nullptr, 10);
+    return v > 0 ? v : -1;
+}
+
+size_t autoBudgetBytes(long availableKb) {
+    const size_t lo = 320 * kMiB, hi = 768 * kMiB;
+    if (availableKb < 0) return lo;
+    const size_t quarter = static_cast<size_t>(availableKb) * 1024 / 4;
+    return std::min(hi, std::max(lo, quarter));
+}
+
+size_t currentAutoBudget() {
+    std::FILE* f = std::fopen("/proc/meminfo", "r");
+    if (!f) return autoBudgetBytes(-1);
+    char buf[2048];
+    const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+    std::fclose(f);
+    buf[n] = 0;
+    return autoBudgetBytes(parseMemAvailableKb(buf));
+}
+
 inline float clamp01(float v) {
     if (!(v > 0.f)) return 0.f;  // also maps NaN to 0
     if (v > 1.f) return 1.f;
@@ -179,7 +206,7 @@ public:
     int tileSize = 0;
     int tilePad = 16;
     int threads = 0;
-    int budgetMB = 320;
+    int budgetMB = 0;  // 0 = automatic
     ProgressCallback progress;
     DeviceType usedDevice = DeviceType::CPU_NEON;
 
@@ -343,7 +370,7 @@ public:
             gpuBackend.reset();
             gpuState = problem;
         } else {
-            gpuState = "active (" + detail + ")";
+            gpuState = "active (" + detail + "; " + gpuBackend->describe() + ")";
         }
     }
 
@@ -397,9 +424,13 @@ public:
 #endif
     }
 
+    size_t budgetBytes() const {
+        return budgetMB > 0 ? static_cast<size_t>(budgetMB) * kMiB : currentAutoBudget();
+    }
+
     // Largest tile (in input pixels) whose working set fits in the budget.
     int chooseTile(int w, int h, int pad, bool useGpu) const {
-        const size_t budget = static_cast<size_t>(std::max(budgetMB, 16)) * kMiB;
+        const size_t budget = budgetBytes();
         const int longest = std::max(w, h);
         auto fitsBudget = [&](int ph, int pw) {
             if (useGpu) {
@@ -682,6 +713,13 @@ void Engine::cancel() { pimpl->cancelFlag.store(true); }
 DeviceType Engine::lastDevice() const { return pimpl->usedDevice; }
 std::string Engine::gpuStatus() const { return pimpl->gpuState; }
 bool Engine::gpuActive() const { return pimpl->gpuBackend != nullptr; }
+
+std::string Engine::gpuProfile(int h, int w) {
+    std::unique_lock<std::mutex> lock(pimpl->runMutex, std::try_to_lock);
+    if (!lock.owns_lock()) return "the engine is busy";
+    if (!pimpl->gpuBackend) return "the GPU is not active: " + pimpl->gpuState;
+    return pimpl->gpuBackend->profile(h, w);
+}
 
 void Engine::adoptGpuBackendForTesting(gpu::Backend* backend, bool checkSpeed) {
     std::lock_guard<std::mutex> lock(pimpl->runMutex);

@@ -69,7 +69,7 @@ public:
     void setTileSize(int pixels);        // 0 = choose automatically from the memory budget
     void setTilePad(int pixels);         // overlap read around each tile (default 16)
     void setThreads(int threads);        // 0 = automatic (up to 8)
-    void setMemoryBudgetMB(int mb);      // working memory for one tile (default 320)
+    void setMemoryBudgetMB(int mb);      // working memory for one tile (default: automatic, 320-768 MB from free RAM)
     void setProgressCallback(ProgressCallback cb);
 
     // May be called from any thread; stops the running job as soon as possible.
@@ -81,6 +81,8 @@ public:
     // Why the GPU path is or is not active for the loaded model, in one line.
     std::string gpuStatus() const;
     bool gpuActive() const;
+    // Diagnostic: where the GPU time goes for an h x w tile (empty text when the GPU path is not active).
+    std::string gpuProfile(int h, int w);
 
     // Internal: lets tests inject a backend. Takes ownership. `checkSpeed` = false skips the speed comparison.
     void adoptGpuBackendForTesting(gpu::Backend* backend, bool checkSpeed);

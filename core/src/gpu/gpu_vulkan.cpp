@@ -25,6 +25,7 @@ std::unique_ptr<Backend> createVulkanBackend(const VulkanHandles&, const Model&,
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <utility>
@@ -76,6 +77,7 @@ public:
             return false;
         }
         maxRange_ = l.maxStorageBufferRange;
+        deviceName_ = props.deviceName;
 
         if (!createShader(kSpvConv3x3, sizeof(kSpvConv3x3), shaders_[0]) || !createShader(kSpvEltwise, sizeof(kSpvEltwise), shaders_[1]) ||
             !createShader(kSpvResize, sizeof(kSpvResize), shaders_[2])) {
@@ -137,6 +139,90 @@ public:
         }
         std::memcpy(weights_.mapped, w.data(), w.size() * sizeof(float));
         return true;
+    }
+
+    std::string describe() const override {
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "%s, largest buffer %.0f MB", deviceName_.c_str(), static_cast<double>(maxRange_) / 1048576.0);
+        return buf;
+    }
+
+    std::string profile(int h, int w) override {
+        if (lost_) return "the GPU was lost earlier";
+        std::string err;
+        Plan::setWorkTargets(1.0e9, 0.0);  // one submit per command
+        Compiled* c = compiled(h, w, &err, std::make_pair(-h, -w));
+        Plan::setWorkTargets(1.0e9, 4.0e9);
+        if (!c) return "cannot prepare the profile: " + err;
+        const Program& p = c->program;
+        lastH_ = lastW_ = -1;
+        std::memset(arena_.mapped, 0, arena_.size);
+        float* inBase = reinterpret_cast<float*>(static_cast<char*>(arena_.mapped) + p.inputOffset);
+        const size_t row = static_cast<size_t>(w) + 2;
+        for (int ch = 0; ch < p.inChannels; ++ch) {
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) inBase[static_cast<size_t>(ch) * p.inPlane + (static_cast<size_t>(y) + 1) * row + x + 1] = 0.5f;
+            }
+        }
+        std::vector<const Command*> work;
+        for (const Command& cmd : p.commands) {
+            if (cmd.type != Command::kBoundary) work.push_back(&cmd);
+        }
+        std::vector<double> ms;
+        for (VkCommandBuffer cb : c->segments) {
+            VkSubmitInfo si{};
+            si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            si.commandBufferCount = 1;
+            si.pCommandBuffers = &cb;
+            const auto t0 = std::chrono::steady_clock::now();
+            VkResult r = vkQueueSubmit(queue_, 1, &si, fence_);
+            if (r == VK_SUCCESS) r = vkWaitForFences(dev_, 1, &fence_, VK_TRUE, kFenceTimeoutNs);
+            const auto t1 = std::chrono::steady_clock::now();
+            if (r != VK_SUCCESS) {
+                lost_ = true;
+                return "the GPU failed during the profile (" + std::to_string(static_cast<int>(r)) + ")";
+            }
+            vkResetFences(dev_, 1, &fence_);
+            ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        lastH_ = lastW_ = -1;  // the memory now holds profile data
+        // The last segment is empty: it measures the cost of a submit.
+        const double overhead = ms.empty() ? 0.0 : ms.back();
+        double kindMs[4] = {0, 0, 0, 0};
+        int kindCount[4] = {0, 0, 0, 0};
+        struct Conv { double ms; int cin, cout, h, w; };
+        std::vector<Conv> convs;
+        double total = 0.0;
+        for (size_t i = 0; i < work.size() && i < ms.size(); ++i) {
+            const Command& cmd = *work[i];
+            const double t = std::max(0.0, ms[i] - overhead);
+            const int kind = cmd.type == Command::kCopy ? 3 : static_cast<int>(cmd.kernel);
+            kindMs[kind] += t;
+            ++kindCount[kind];
+            total += t;
+            if (cmd.type == Command::kDispatch && cmd.kernel == Kernel::Conv3x3) {
+                convs.push_back({t, cmd.push.i[0], static_cast<int>(cmd.gz) * 8, cmd.push.i[1], cmd.push.i[2]});
+            }
+        }
+        std::sort(convs.begin(), convs.end(), [](const Conv& a, const Conv& b) { return a.ms > b.ms; });
+        char buf[256];
+        std::string out;
+        std::snprintf(buf, sizeof(buf), "tile %dx%d: %.0f ms of GPU work in %zu commands (a submit costs %.2f ms)\n", h, w, total,
+                      work.size(), overhead);
+        out += buf;
+        const char* names[4] = {"convolution 3x3", "element-wise", "nearest resize", "buffer copy"};
+        for (int k = 0; k < 4; ++k) {
+            std::snprintf(buf, sizeof(buf), "  %-16s %8.1f ms  %5.1f%%  (%d commands)\n", names[k], kindMs[k],
+                          total > 0 ? 100.0 * kindMs[k] / total : 0.0, kindCount[k]);
+            out += buf;
+        }
+        out += "slowest convolution dispatches:\n";
+        for (size_t i = 0; i < convs.size() && i < 4; ++i) {
+            std::snprintf(buf, sizeof(buf), "  %3d -> %3d channels, %dx%d rows: %.1f ms\n", convs[i].cin, convs[i].cout, convs[i].w,
+                          convs[i].h, convs[i].ms);
+            out += buf;
+        }
+        return out;
     }
 
     int inChannels() const override { return plan_->inChannels(); }
@@ -288,8 +374,8 @@ private:
     }
 
     // Builds (once per image size) the program, descriptor sets and command buffers.
-    Compiled* compiled(int h, int w, std::string* error) {
-        const std::pair<int, int> key(h, w);
+    Compiled* compiled(int h, int w, std::string* error, std::pair<int, int> key = std::make_pair(0, 0)) {
+        if (key.first == 0 && key.second == 0) key = std::make_pair(h, w);
         auto it = cache_.find(key);
         if (it != cache_.end()) return &it->second;
         if (cache_.size() >= 6) {
@@ -433,6 +519,7 @@ private:
     uint32_t family_;
     std::unique_ptr<Plan> plan_;
     size_t maxRange_ = 0;
+    std::string deviceName_;
     VkShaderModule shaders_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkPipeline pipelines_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;

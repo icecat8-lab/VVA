@@ -431,6 +431,18 @@ def main():
     print(r.stdout.rstrip())
     T.check(r.returncode == 0, "engine_test passes (exit %d) %s" % (r.returncode, r.stderr[-300:]))
 
+    print("== memory budget helpers ==")
+    budget_bin = os.path.join(WORK, "budget_test")
+    cores = [os.path.join(ROOT, "core", "src", f) for f in ("model.cpp", "exec.cpp", "gpu/gpu_plan.cpp", "gpu/gpu_vulkan.cpp")]
+    rb = run(["g++", "-std=c++17", "-g", "-O1", "-fsanitize=address,undefined", "-DVVA_NO_VULKAN", "-pthread",
+              "-I", os.path.join(ROOT, "core", "include"), "-I", os.path.join(ROOT, "core", "src"),
+              os.path.join(ROOT, "tests", "budget_test.cpp")] + cores + ["-o", budget_bin])
+    T.check(rb.returncode == 0, "budget_test builds: " + rb.stderr[-300:])
+    if rb.returncode == 0:
+        rb = run([budget_bin], env=ENV)
+        print(rb.stdout.rstrip())
+        T.check(rb.returncode == 0, "budget_test passes " + (rb.stdout + rb.stderr)[-300:])
+
     print("== JNI pixel logic (host build with stub Android headers) ==")
     jni_bin = os.path.join(WORK, "jni_logic_test")
     core = [os.path.join(ROOT, "core", "src", f) for f in ("vva.cpp", "model.cpp", "exec.cpp")]
