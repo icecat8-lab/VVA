@@ -80,7 +80,8 @@ public:
         deviceName_ = props.deviceName;
 
         if (!createShader(kSpvConv3x3, sizeof(kSpvConv3x3), shaders_[0]) || !createShader(kSpvEltwise, sizeof(kSpvEltwise), shaders_[1]) ||
-            !createShader(kSpvResize, sizeof(kSpvResize), shaders_[2])) {
+            !createShader(kSpvResize, sizeof(kSpvResize), shaders_[2]) || !createShader(kSpvConv4oc, sizeof(kSpvConv4oc), shaders_[3]) ||
+            !createShader(kSpvConv8px, sizeof(kSpvConv8px), shaders_[4])) {
             *status = "the driver rejected a shader";
             return false;
         }
@@ -113,7 +114,7 @@ public:
             *status = "cannot create the pipeline layout";
             return false;
         }
-        for (int k = 0; k < 3; ++k) {
+        for (int k = 0; k < kPipelines; ++k) {
             VkComputePipelineCreateInfo ci{};
             ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
             ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -228,12 +229,22 @@ public:
     int inChannels() const override { return plan_->inChannels(); }
     int outChannels() const override { return plan_->outChannels(); }
 
+    int variantCount() const override { return kConvVariants; }
+    int variantIndex() const override { return variant_; }
+    void setVariant(int variant) override {
+        if (variant < 0 || variant >= kConvVariants || variant == variant_) return;
+        vkQueueWaitIdle(queue_);
+        dropPrograms();
+        variant_ = variant;
+        lastH_ = lastW_ = -1;
+    }
+
     bool fits(int h, int w) override { return estimateBytes(h, w) > 0; }
 
     size_t estimateBytes(int h, int w) override {
         Program p;
         std::string err;
-        if (!plan_->build(h, w, p, &err)) return 0;
+        if (!plan_->build(h, w, p, &err, variant_)) return 0;
         if (p.maxBindBytes > maxRange_ || p.arenaBytes > kMaxArenaBytes) return 0;
         return p.arenaBytes;
     }
@@ -365,7 +376,7 @@ private:
         destroyMem(arena_);
         destroyMem(weights_);
         if (fence_ != VK_NULL_HANDLE) vkDestroyFence(dev_, fence_, nullptr);
-        for (int k = 0; k < 3; ++k) {
+        for (int k = 0; k < kPipelines; ++k) {
             if (pipelines_[k] != VK_NULL_HANDLE) vkDestroyPipeline(dev_, pipelines_[k], nullptr);
             if (shaders_[k] != VK_NULL_HANDLE) vkDestroyShaderModule(dev_, shaders_[k], nullptr);
         }
@@ -383,7 +394,7 @@ private:
             dropPrograms();
         }
         Compiled c;
-        if (!plan_->build(h, w, c.program, error)) return nullptr;
+        if (!plan_->build(h, w, c.program, error, variant_)) return nullptr;
         const Program& p = c.program;
         if (p.maxBindBytes > maxRange_ || p.arenaBytes > kMaxArenaBytes) {
             if (error) *error = "this image size needs more GPU memory than the device allows";
@@ -520,8 +531,10 @@ private:
     std::unique_ptr<Plan> plan_;
     size_t maxRange_ = 0;
     std::string deviceName_;
-    VkShaderModule shaders_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
-    VkPipeline pipelines_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+    static constexpr int kPipelines = 5;
+    VkShaderModule shaders_[kPipelines] = {};
+    VkPipeline pipelines_[kPipelines] = {};
+    int variant_ = 0;
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     VkFence fence_ = VK_NULL_HANDLE;

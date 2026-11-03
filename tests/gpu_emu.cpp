@@ -79,6 +79,12 @@ uvec3 gl_GlobalInvocationID;
 void emuConv() {
 #include "kernels/kernel_conv3x3.inc"
 }
+void emuConv4oc() {
+#include "kernels/kernel_conv3x3_4oc.inc"
+}
+void emuConv8px() {
+#include "kernels/kernel_conv3x3_8px.inc"
+}
 #undef P_CIN
 #undef P_H
 #undef P_W
@@ -171,7 +177,7 @@ bool Emulator::run(const Program& prog, const float* in, float* out, std::string
             srcA = src;
             res = {a3, cmd.bind[3].size / sizeof(float)};
             dst = {a2, cmd.bind[2].size / sizeof(float)};
-            if (cmd.kernel == Kernel::Conv3x3) {
+            if (cmd.kernel != Kernel::Eltwise && cmd.kernel != Kernel::Resize) {
                 const Bind& wb = cmd.bind[1];
                 ok1 = wb.buffer == 1 && wb.offset % 256 == 0 && wb.offset + wb.size <= weights_.size() * sizeof(float);
                 if (!ok1) return fail("bad weights binding");
@@ -192,6 +198,8 @@ bool Emulator::run(const Program& prog, const float* in, float* out, std::string
                             for (unsigned ix = 0; ix < lx; ++ix) {
                                 gl_GlobalInvocationID = {gx * lx + ix, gy * ly + iy, gz};
                                 if (cmd.kernel == Kernel::Conv3x3) emuConv();
+                                else if (cmd.kernel == Kernel::Conv3x3_4oc) emuConv4oc();
+                                else if (cmd.kernel == Kernel::Conv3x3_8px) emuConv8px();
                                 else if (cmd.kernel == Kernel::Eltwise) emuElt();
                                 else emuResize();
                             }

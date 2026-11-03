@@ -19,6 +19,7 @@
 
 #include "exec.h"
 #include "gpu/gpu_backend.h"
+#include "gpu/gpu_types.h"
 #include "model.h"
 
 #ifndef VVA_NO_VULKAN
@@ -308,7 +309,8 @@ public:
         }
     }
 
-    // Runs the backend against the CPU executor. Returns an empty string on success, otherwise the reason.
+    // Runs the backend against the CPU executor, for every kernel variant. Keeps the fastest variant that is
+    // correct. Returns an empty string on success, otherwise the reason.
     std::string verifyBackend(bool checkSpeed, std::string* detail) {
         const int ch = exec->inChannels();
         const int h1 = 20, w1 = 24;
@@ -324,42 +326,73 @@ public:
             return "the CPU reference run failed: " + err;
         }
         const double cpuSeconds = now() - t0;
-        if (gpuBackend->run(in.data(), h1, w1, gpuOut.data(), nullptr, &err) != gpu::Backend::Status::Ok) {
-            return "the GPU test run failed: " + err;
+        double range = 1.0;
+        for (size_t i = 0; i < outN; ++i) range = std::max(range, static_cast<double>(std::fabs(cpu[i])));
+
+        const int h2 = 48, w2 = 48;
+        std::vector<float> in2, out2;
+        if (checkSpeed) {
+            in2.assign(static_cast<size_t>(ch) * h2 * w2, 0.f);
+            fillProbe(in2, 11);
+            Shape os2;
+            if (!exec->outputShape(h2, w2, &os2)) return "the model cannot run the speed test image";
+            out2.assign(numel(os2), 0.f);
         }
-        double worst = 0.0, range = 1.0;
-        for (size_t i = 0; i < outN; ++i) {
-            range = std::max(range, static_cast<double>(std::fabs(cpu[i])));
-            const double d = std::fabs(static_cast<double>(cpu[i]) - static_cast<double>(gpuOut[i]));
-            if (!(d <= worst)) worst = d;  // NaN counts as the worst case
+
+        const int variants = std::max(1, gpuBackend->variantCount());
+        int best = -1;
+        double bestRate = 0.0;
+        std::string problem, rates;
+        for (int v = 0; v < variants; ++v) {
+            gpuBackend->setVariant(v);
+            err.clear();
+            const gpu::Backend::Status st = gpuBackend->run(in.data(), h1, w1, gpuOut.data(), nullptr, &err);
+            if (st != gpu::Backend::Status::Ok) {
+                problem = "the GPU test run failed: " + err;
+                if (st == gpu::Backend::Status::DeviceLost) break;
+                continue;
+            }
+            double worst = 0.0;
+            for (size_t i = 0; i < outN; ++i) {
+                const double d = std::fabs(static_cast<double>(cpu[i]) - static_cast<double>(gpuOut[i]));
+                if (!(d <= worst)) worst = d;  // NaN counts as the worst case
+            }
+            if (!(worst / range <= 2e-3)) {
+                problem = std::string("the GPU test gave wrong results (error ") + std::to_string(worst / range) + ")";
+                continue;
+            }
+            double rate = 0.0;
+            if (checkSpeed) {
+                if (gpuBackend->run(in2.data(), h2, w2, out2.data(), nullptr, &err) != gpu::Backend::Status::Ok) {  // warm-up
+                    problem = "the GPU speed test failed: " + err;
+                    continue;
+                }
+                const double t1 = now();
+                if (gpuBackend->run(in2.data(), h2, w2, out2.data(), nullptr, &err) != gpu::Backend::Status::Ok) {
+                    problem = "the GPU speed test failed: " + err;
+                    continue;
+                }
+                rate = (static_cast<double>(h2) * w2) / std::max(now() - t1, 1e-6);
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "%s%s %.0f", rates.empty() ? "" : ", ", gpu::convVariantName(v), rate);
+                rates += buf;
+            }
+            if (best < 0 || rate > bestRate) {
+                best = v;
+                bestRate = rate;
+            }
         }
-        const double error = worst / range;
-        if (!(error <= 2e-3)) return "the GPU test gave wrong results (error " + std::to_string(error) + ")";
+        if (best < 0) return problem.empty() ? "no GPU kernel passed the self-test" : problem;
+        gpuBackend->setVariant(best);
         if (!checkSpeed) {
             *detail = "self-test passed";
             return std::string();
         }
-        // Speed: pixels per second on a larger probe for the GPU against the CPU's rate from the run above.
-        const int h2 = 40, w2 = 40;
-        std::vector<float> in2(static_cast<size_t>(ch) * h2 * w2);
-        fillProbe(in2, 11);
-        Shape os2;
-        if (!exec->outputShape(h2, w2, &os2)) return "the model cannot run the speed test image";
-        std::vector<float> out2(numel(os2));
-        if (gpuBackend->run(in2.data(), h2, w2, out2.data(), nullptr, &err) != gpu::Backend::Status::Ok) {  // warm-up
-            return "the GPU speed test failed: " + err;
-        }
-        const double t1 = now();
-        if (gpuBackend->run(in2.data(), h2, w2, out2.data(), nullptr, &err) != gpu::Backend::Status::Ok) {
-            return "the GPU speed test failed: " + err;
-        }
-        const double gpuSeconds = now() - t1;
         const double cpuRate = (static_cast<double>(h1) * w1) / std::max(cpuSeconds, 1e-6);
-        const double gpuRate = (static_cast<double>(h2) * w2) / std::max(gpuSeconds, 1e-6);
-        char buf[160];
-        std::snprintf(buf, sizeof(buf), "GPU %.0f px/s, CPU %.0f px/s", gpuRate, cpuRate);
+        char buf[200];
+        std::snprintf(buf, sizeof(buf), "kernel %s [px/s: %s]; CPU %.0f px/s", gpu::convVariantName(best), rates.c_str(), cpuRate);
         *detail = buf;
-        if (gpuRate < 1.3 * cpuRate) return std::string("the GPU is not faster than the CPU on this device (") + buf + ")";
+        if (bestRate < 1.3 * cpuRate) return std::string("the GPU is not faster than the CPU on this device (") + buf + ")";
         return std::string();
     }
 

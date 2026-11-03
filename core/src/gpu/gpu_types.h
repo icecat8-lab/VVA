@@ -13,7 +13,16 @@
 namespace vva {
 namespace gpu {
 
-enum class Kernel : int { Conv3x3 = 0, Eltwise = 1, Resize = 2 };
+// The three convolution kernels differ only in how much each invocation computes; they share data layout and weights.
+enum class Kernel : int { Conv3x3 = 0, Eltwise = 1, Resize = 2, Conv3x3_4oc = 3, Conv3x3_8px = 4 };
+
+constexpr int kConvVariants = 3;
+inline Kernel convKernel(int variant) {
+    return variant == 1 ? Kernel::Conv3x3_4oc : (variant == 2 ? Kernel::Conv3x3_8px : Kernel::Conv3x3);
+}
+inline const char* convVariantName(int variant) {
+    return variant == 1 ? "4px x 4ch" : (variant == 2 ? "8px x 8ch" : "4px x 8ch");
+}
 
 // Push constants, identical for every kernel (the kernels give the fields their own names).
 struct Push {

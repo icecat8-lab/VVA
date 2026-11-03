@@ -16,7 +16,8 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GPU = os.path.join(ROOT, "core", "src", "gpu")
-SHADERS = [("kSpvConv3x3", "conv3x3.comp"), ("kSpvEltwise", "eltwise.comp"), ("kSpvResize", "resize.comp")]
+SHADERS = [("kSpvConv3x3", "conv3x3.comp"), ("kSpvEltwise", "eltwise.comp"), ("kSpvResize", "resize.comp"),
+           ("kSpvConv4oc", "conv3x3_4oc.comp"), ("kSpvConv8px", "conv3x3_8px.comp")]
 
 
 def spv_to_array(name, data):

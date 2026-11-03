@@ -20,3 +20,13 @@ void vva_out(int base, int x, vec4 lo, vec4 hi) {
     vva_put(base + 6 * P_PLANE, hi.z);
     vva_put(base + 7 * P_PLANE, hi.w);
 }
+
+void vva_out4(int base, int x, vec4 v) {
+    if (x >= P_W) {
+        return;
+    }
+    vva_put(base, v.x);
+    vva_put(base + P_PLANE, v.y);
+    vva_put(base + 2 * P_PLANE, v.z);
+    vva_put(base + 3 * P_PLANE, v.w);
+}

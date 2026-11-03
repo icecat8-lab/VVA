@@ -34,7 +34,7 @@ def build():
     return exe
 
 
-def emu(exe, model, x, second=None):
+def emu(exe, model, x, second=None, variant=0):
     c, h, w = x.shape
     inp, out = os.path.join(WORK, "g_in.f32"), os.path.join(WORK, "g_out.f32")
     np.ascontiguousarray(x, dtype=np.float32).tofile(inp)
@@ -43,7 +43,7 @@ def emu(exe, model, x, second=None):
     cmd = [exe, model, inp, str(c), str(h), str(w), out]
     if second:
         cmd += [str(second[0]), str(second[1])]
-    r = run(cmd, env=ENV)
+    r = run(cmd, env=dict(ENV, VVA_TEST_VARIANT=str(variant)))
     text = (r.stdout + r.stderr).strip()
     return text, (np.fromfile(out, dtype=np.float32) if r.returncode == 0 else None)
 
@@ -157,6 +157,32 @@ def main():
         # Memory layout changes between images: the second run must not see leftovers of the first.
         text2, got2 = emu(exe, model, x, second=(h + 5, w + 3))
         T.check(got2 is not None and got is not None and np.array_equal(got, got2), "%dx%d: a previous image of another size leaves no trace" % (h, w))
+
+    print("== every convolution kernel variant against numpy ==")
+    for variant in (0, 1, 2):
+        for nf, gc, nb, h, w, seed in ((16, 8, 1, 7, 21, 31), (8, 8, 1, 1, 1, 32), (16, 8, 1, 5, 40, 33), (16, 8, 2, 17, 9, 34)):
+            sd = make_rrdbnet_state(nf, gc, nb, seed=seed)
+            model = os.path.join(WORK, "gp_var_%d.vva" % seed)
+            convert(save_npz(sd, "gp_var_%d" % seed), model, name="t", log=lambda *_: None)
+            meta, stored = read_vva(model)
+            deq = {k: np.asarray(v, dtype=np.float64) for k, v in stored.items()}
+            x = rng.rand(3, h, w).astype(np.float32)
+            text, got = emu(exe, model, x, variant=variant)
+            T.check(got is not None, "variant %d nf=%d %dx%d runs (%s)" % (variant, nf, h, w, text[-100:]))
+            if got is not None:
+                want = run_graph(meta, deq, x.astype(np.float64)).reshape(-1)
+                e = rel(got.astype(np.float64), want) if got.size == want.size else -1
+                T.check(0 <= e < 5e-5, "variant %d nf=%d %dx%d matches numpy (rel err %.1e)" % (variant, nf, h, w, e))
+        for name, (writer, cin) in graphs().items():
+            path = os.path.join(WORK, "gp_v_%s.vva" % name)
+            writer.save(path)
+            meta, stored = read_vva(path)
+            deq = {k: np.asarray(v, dtype=np.float64) for k, v in stored.items()}
+            x = rng.rand(cin, 6, 11).astype(np.float32)
+            text, got = emu(exe, path, x, variant=variant)
+            want = run_graph(meta, deq, x.astype(np.float64)).reshape(-1)
+            T.check(got is not None and got.size == want.size and rel(got.astype(np.float64), want) < 5e-5,
+                    "variant %d graph %s matches numpy" % (variant, name))
 
     print("== work splitting: tiny dispatch/submit targets give identical results ==")
     sd = make_rrdbnet_state(16, 8, 1, seed=11)

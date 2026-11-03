@@ -29,6 +29,7 @@ struct Mode {
     int failOnCall = -1;      // 1-based call index at which run() fails (-1: never)
     bool deviceLost = false;  // report DeviceLost instead of Error
     float corrupt = 0.f;      // added to every output value
+    int badMask = 0;          // kernel variants (bit per variant) that return wrong numbers
 };
 
 class EmuBackend : public Backend {
@@ -54,22 +55,26 @@ public:
         }
         vva::gpu::Program prog;
         std::string err;
-        if (!plan_->build(h, w, prog, &err) || !emu_.run(prog, in, out, &err)) {
+        if (!plan_->build(h, w, prog, &err, variant_) || !emu_.run(prog, in, out, &err)) {
             if (error) *error = err;
             return Status::Error;
         }
-        if (mode_.corrupt != 0.f) {
+        if (mode_.corrupt != 0.f || (mode_.badMask & (1 << variant_))) {
             const size_t n = static_cast<size_t>(prog.outChannels) * prog.outH * prog.outW;
-            for (size_t i = 0; i < n; ++i) out[i] += mode_.corrupt;
+            for (size_t i = 0; i < n; ++i) out[i] += mode_.corrupt != 0.f ? mode_.corrupt : 0.25f;
         }
         return Status::Ok;
     }
+    int variantCount() const override { return vva::gpu::kConvVariants; }
+    void setVariant(int v) override { variant_ = v; }
+    int variantIndex() const override { return variant_; }
     std::string describe() const override { return "emulated"; }
     std::string profile(int, int) override { return "emulated profile\n"; }
     int inChannels() const override { return plan_->inChannels(); }
     int outChannels() const override { return plan_->outChannels(); }
 
     int calls = 0;
+    int variant_ = 0;
     ~EmuBackend() override { ++destroyed; }
     static int destroyed;
 
@@ -190,6 +195,37 @@ int main(int argc, char** argv) {
         (void)b;
         std::vector<uint8_t> again(outBytes);
         CHECK(e.processImageTile(in.data(), W, H, again.data(), kAuto) && maxDiff(again, want) <= 1, "later jobs run on the CPU");
+    }
+
+    {  // Kernel variants: the self-test skips a wrong one and keeps a correct one.
+        vva::Engine e;
+        e.loadModel(argv[1]);
+        e.setTileSize(16);
+        e.setTilePad(8);
+        Mode m;
+        m.badMask = 1 << 0;  // the default variant is wrong
+        EmuBackend* b = attach(e, *model, m);
+        CHECK(e.gpuActive() && b->variantIndex() == 1, "a wrong variant is skipped and the next correct one is used");
+        std::vector<uint8_t> got(outBytes);
+        CHECK(e.processImageTile(in.data(), W, H, got.data(), kAuto) && maxDiff(got, want) <= 1, "the chosen variant produces the right picture");
+        vva::Engine e2;
+        e2.loadModel(argv[1]);
+        Mode all;
+        all.badMask = 7;
+        attach(e2, *model, all);
+        CHECK(!e2.gpuActive() && e2.gpuStatus().find("wrong results") != std::string::npos, "every variant wrong -> GPU rejected");
+        for (int v = 0; v < 3; ++v) {  // each variant on its own gives the same picture as the CPU
+            vva::Engine e3;
+            e3.loadModel(argv[1]);
+            e3.setTileSize(16);
+            e3.setTilePad(8);
+            Mode only;
+            only.badMask = 7 & ~(1 << v);
+            EmuBackend* bv = attach(e3, *model, only);
+            CHECK(e3.gpuActive() && bv->variantIndex() == v, "only variant v is correct and gets chosen");
+            std::vector<uint8_t> g(outBytes);
+            CHECK(e3.processImageTile(in.data(), W, H, g.data(), kAuto) && maxDiff(g, want) <= 1, "variant output equals the CPU picture");
+        }
     }
 
     {  // A GPU that returns wrong numbers is rejected by the self-test.

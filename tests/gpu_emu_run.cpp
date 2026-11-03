@@ -15,6 +15,8 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (const char* e = std::getenv("VVA_TEST_DISPATCH_FLOPS")) vva::gpu::Plan::setWorkTargets(std::atof(e), std::atof(e) * 3.0);
+    int variant = 0;
+    if (const char* v = std::getenv("VVA_TEST_VARIANT")) variant = std::atoi(v);
     std::string err;
     std::unique_ptr<vva::Model> model = vva::Model::load(argv[1], &err);
     if (!model) {
@@ -37,7 +39,7 @@ int main(int argc, char** argv) {
     std::vector<float> out;
     auto runOnce = [&](const std::vector<float>& input, int hh, int ww) {
         vva::gpu::Program prog;
-        if (!plan->build(hh, ww, prog, &err)) {
+        if (!plan->build(hh, ww, prog, &err, variant)) {
             std::printf("BUILD_ERROR: %s\n", err.c_str());
             return false;
         }

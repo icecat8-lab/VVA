@@ -34,7 +34,8 @@ public:
     static void setWorkTargets(double dispatchFlops, double segmentFlops);
 
     // Lays the model out for an h x w input.
-    bool build(int h, int w, Program& program, std::string* error) const;
+    // `convVariant` selects the convolution kernel (see convVariantName()).
+    bool build(int h, int w, Program& program, std::string* error, int convVariant = 0) const;
 
 private:
     Plan();

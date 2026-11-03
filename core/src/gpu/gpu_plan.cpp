@@ -523,7 +523,7 @@ void Plan::setWorkTargets(double dispatchFlops, double segmentFlops) {
     gSegmentFlops = segmentFlops;
 }
 
-bool Plan::build(int h, int w, Program& prog, std::string* error) const {
+bool Plan::build(int h, int w, Program& prog, std::string* error, int convVariant) const {
     const Impl& im = *impl_;
     prog = Program();
     if (h < 1 || w < 1 || h > 16384 || w > 16384) return fail(error, "invalid size");
@@ -639,7 +639,7 @@ bool Plan::build(int h, int w, Program& prog, std::string* error) const {
                 const int n = std::min(rows, tin.h - y0);
                 Command cmd;
                 cmd.type = Command::kDispatch;
-                cmd.kernel = Kernel::Conv3x3;
+                cmd.kernel = convKernel(convVariant);
                 cmd.push.i[0] = cd.cin;
                 cmd.push.i[1] = tin.h;
                 cmd.push.i[2] = tin.w;
@@ -655,9 +655,10 @@ bool Plan::build(int h, int w, Program& prog, std::string* error) const {
                 cmd.bind[1].size = cd.floats * sizeof(float);
                 cmd.bind[2] = bindArena(op.out);
                 cmd.bind[3] = op.res >= 0 ? bindArena(op.res) : bindArena(op.in[0]);
-                cmd.gx = static_cast<uint32_t>((((tin.w + 3) / 4) + 15) / 16);
+                const int pixelsPer = convVariant == 2 ? 8 : 4;
+                cmd.gx = static_cast<uint32_t>((((tin.w + pixelsPer - 1) / pixelsPer) + 15) / 16);
                 cmd.gy = static_cast<uint32_t>((n + 3) / 4);
-                cmd.gz = static_cast<uint32_t>(cout8 / 8);
+                cmd.gz = static_cast<uint32_t>(cout8 / (convVariant == 1 ? 4 : 8));
                 cmd.flops = rowFlops * n;
                 prog.maxBindBytes = std::max(prog.maxBindBytes, cmd.bind[1].size);
                 push(cmd);

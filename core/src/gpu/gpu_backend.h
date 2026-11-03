@@ -35,6 +35,10 @@ public:
     virtual std::string describe() const = 0;
     // Runs an h x w image with one submit per command and reports where the time goes. Diagnostic only.
     virtual std::string profile(int h, int w) = 0;
+    // Convolution kernel variants (see convVariantName()); the engine picks the fastest correct one at start-up.
+    virtual int variantCount() const = 0;
+    virtual void setVariant(int variant) = 0;
+    virtual int variantIndex() const = 0;
     virtual int inChannels() const = 0;
     virtual int outChannels() const = 0;
 };
