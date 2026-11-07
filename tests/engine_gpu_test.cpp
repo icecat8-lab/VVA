@@ -30,6 +30,7 @@ struct Mode {
     bool deviceLost = false;  // report DeviceLost instead of Error
     float corrupt = 0.f;      // added to every output value
     int badMask = 0;          // kernel variants (bit per variant) that return wrong numbers
+    std::string identity = "emulated";
 };
 
 class EmuBackend : public Backend {
@@ -45,6 +46,7 @@ public:
     }
     Status run(const float* in, int h, int w, float* out, const std::atomic<bool>* cancel, std::string* error) override {
         ++calls;
+        ++totalRuns;
         if (cancel && cancel->load()) {
             if (error) *error = "cancelled";
             return Status::Cancelled;
@@ -69,11 +71,13 @@ public:
     void setVariant(int v) override { variant_ = v; }
     int variantIndex() const override { return variant_; }
     std::string describe() const override { return "emulated"; }
+    std::string identity() const override { return mode_.identity; }
     std::string profile(int, int) override { return "emulated profile\n"; }
     int inChannels() const override { return plan_->inChannels(); }
     int outChannels() const override { return plan_->outChannels(); }
 
     int calls = 0;
+    static int totalRuns;
     int variant_ = 0;
     ~EmuBackend() override { ++destroyed; }
     static int destroyed;
@@ -85,6 +89,7 @@ private:
 };
 
 int EmuBackend::destroyed = 0;
+int EmuBackend::totalRuns = 0;
 
 static std::vector<uint8_t> makeImage(int w, int h) {
     std::vector<uint8_t> img(static_cast<size_t>(w) * h * 4);
@@ -264,6 +269,41 @@ int main(int argc, char** argv) {
         e.setProgressCallback(nullptr);
         CHECK(e.processImageTile(in.data(), W, H, got.data(), kAuto) && maxDiff(got, want) <= 1, "usable after a cancel");
         CHECK(e.gpuActive(), "a cancel does not disable the GPU");
+    }
+
+    {  // Test results are remembered per device (next to the model), so start-up does not repeat the tuning.
+        const std::string cfg = std::string(argv[1]) + ".gpucfg";
+        std::remove(cfg.c_str());
+        vva::Engine e;
+        e.loadModel(argv[1]);
+        const int r0 = EmuBackend::totalRuns;
+        attach(e, *model, Mode(), true);  // the emulated GPU is slower than the CPU executor
+        CHECK(!e.gpuActive() && e.gpuStatus().find("not faster") != std::string::npos, ("a slow GPU is rejected: " + e.gpuStatus()).c_str());
+        CHECK(EmuBackend::totalRuns > r0, "the first test really ran the GPU");
+        std::FILE* f = std::fopen(cfg.c_str(), "rb");
+        char buf[512] = {0};
+        if (f) {
+            std::fread(buf, 1, sizeof(buf) - 1, f);
+            std::fclose(f);
+        }
+        CHECK(f != nullptr && std::strstr(buf, "usable=0") != nullptr && std::strstr(buf, "identity=emulated") != nullptr,
+              "the verdict is written next to the model");
+
+        vva::Engine e2;
+        e2.loadModel(argv[1]);
+        const int r1 = EmuBackend::totalRuns;
+        attach(e2, *model, Mode(), true);
+        CHECK(EmuBackend::totalRuns == r1, "a remembered verdict skips the GPU test entirely");
+        CHECK(!e2.gpuActive() && e2.gpuStatus().find("earlier test") != std::string::npos, ("status explains: " + e2.gpuStatus()).c_str());
+
+        vva::Engine e3;  // another GPU or driver (different identity) is tested again
+        e3.loadModel(argv[1]);
+        Mode other;
+        other.identity = "another gpu|driver 0x2";
+        const int r2 = EmuBackend::totalRuns;
+        attach(e3, *model, other, true);
+        CHECK(EmuBackend::totalRuns > r2, "a different device is tested again");
+        std::remove(cfg.c_str());
     }
 
     {  // The profile and status texts come from the backend.

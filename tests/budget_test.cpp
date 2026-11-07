@@ -27,6 +27,27 @@ int main() {
     CHECK(vva::autoBudgetBytes(3200000) == 768 * mb, "3.2 GB free (a quarter is 781 MB) is capped at the ceiling");
     CHECK(vva::autoBudgetBytes(100000000) == 768 * mb, "lots of memory: the ceiling");
     CHECK(vva::currentAutoBudget() >= 320 * mb && vva::currentAutoBudget() <= 768 * mb, "the live value is within the limits");
+    // --- remembered GPU test results ---
+    vva::GpuConfig c;
+    c.identity = "Adreno (TM) 642L|vendor 0x5143|driver 0x1";
+    c.usable = true;
+    c.variant = 2;
+    c.reason = "none";
+    c.when = 1000000;
+    vva::GpuConfig back;
+    CHECK(vva::parseGpuConfig(vva::formatGpuConfig(c), back), "a stored result parses");
+    CHECK(back.identity == c.identity && back.usable && back.variant == 2 && back.when == 1000000, "and round-trips");
+    CHECK(vva::gpuConfigFresh(c, c.identity, 3, 1000000 + 3600), "same device, an hour later: valid");
+    CHECK(!vva::gpuConfigFresh(c, "another gpu", 3, 1000000 + 3600), "another device: not valid");
+    CHECK(!vva::gpuConfigFresh(c, c.identity, 3, 1000000 + 31LL * 24 * 3600), "older than 30 days: not valid");
+    CHECK(!vva::gpuConfigFresh(c, c.identity, 3, 1000000 - 5), "a clock that went backwards: not valid");
+    c.variant = 5;
+    CHECK(!vva::gpuConfigFresh(c, c.identity, 3, 1000000 + 10), "a variant that does not exist: not valid");
+    CHECK(!vva::parseGpuConfig("garbage", back), "garbage is rejected");
+    CHECK(!vva::parseGpuConfig("vva-gpu-config 1\nvariant=1\n", back), "a result without identity is rejected");
+    CHECK(!vva::parseGpuConfig("vva-gpu-config 2\nidentity=x\nusable=1\n", back), "another format version is rejected");
+    CHECK(vva::parseGpuConfig("vva-gpu-config 1\nidentity=x\nusable=0\nreason=" + std::string(500, 'r') + "\n", back) && back.reason.size() == 200,
+          "a very long reason is cut");
     std::printf("budget_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

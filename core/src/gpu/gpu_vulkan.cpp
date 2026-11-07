@@ -34,6 +34,14 @@ std::unique_ptr<Backend> createVulkanBackend(const VulkanHandles&, const Model&,
 #include "gpu_plan.h"
 #include "spirv_data.h"
 
+// Headers written by older generators have no macros: both optional variants were present.
+#ifndef VVA_SPV_CONV4OC
+#define VVA_SPV_CONV4OC 1
+#endif
+#ifndef VVA_SPV_CONV8PX
+#define VVA_SPV_CONV8PX 1
+#endif
+
 namespace vva {
 namespace gpu {
 namespace {
@@ -78,13 +86,20 @@ public:
         }
         maxRange_ = l.maxStorageBufferRange;
         deviceName_ = props.deviceName;
+        char idbuf[256];
+        std::snprintf(idbuf, sizeof(idbuf), "%s|vendor 0x%x|device 0x%x|driver 0x%x|Vulkan %u.%u.%u", props.deviceName,
+                      props.vendorID, props.deviceID, props.driverVersion, props.apiVersion >> 22,
+                      (props.apiVersion >> 12) & 0x3ffu, props.apiVersion & 0xfffu);
+        identity_ = idbuf;
 
         if (!createShader(kSpvConv3x3, sizeof(kSpvConv3x3), shaders_[0]) || !createShader(kSpvEltwise, sizeof(kSpvEltwise), shaders_[1]) ||
-            !createShader(kSpvResize, sizeof(kSpvResize), shaders_[2]) || !createShader(kSpvConv4oc, sizeof(kSpvConv4oc), shaders_[3]) ||
-            !createShader(kSpvConv8px, sizeof(kSpvConv8px), shaders_[4])) {
+            !createShader(kSpvResize, sizeof(kSpvResize), shaders_[2])) {
             *status = "the driver rejected a shader";
             return false;
         }
+        // The extra convolution variants are optional: a driver that rejects one simply has fewer choices.
+        if (VVA_SPV_CONV4OC) createShader(kSpvConv4oc, sizeof(kSpvConv4oc), shaders_[3]);
+        if (VVA_SPV_CONV8PX) createShader(kSpvConv8px, sizeof(kSpvConv8px), shaders_[4]);
         VkDescriptorSetLayoutBinding binds[4]{};
         for (uint32_t i = 0; i < 4; ++i) {
             binds[i].binding = i;
@@ -122,9 +137,13 @@ public:
             ci.stage.module = shaders_[k];
             ci.stage.pName = "main";
             ci.layout = layout_;
+            if (shaders_[k] == VK_NULL_HANDLE) continue;  // optional variant not available
             if (vkCreateComputePipelines(dev_, VK_NULL_HANDLE, 1, &ci, nullptr, &pipelines_[k]) != VK_SUCCESS) {
-                *status = "the driver could not build a compute pipeline";
-                return false;
+                if (k < 3) {
+                    *status = "the driver could not build a compute pipeline";
+                    return false;
+                }
+                pipelines_[k] = VK_NULL_HANDLE;
             }
         }
         VkFenceCreateInfo fi{};
@@ -143,10 +162,12 @@ public:
     }
 
     std::string describe() const override {
-        char buf[160];
-        std::snprintf(buf, sizeof(buf), "%s, largest buffer %.0f MB", deviceName_.c_str(), static_cast<double>(maxRange_) / 1048576.0);
+        char buf[320];
+        std::snprintf(buf, sizeof(buf), "%s, largest buffer %.0f MB", identity_.c_str(), static_cast<double>(maxRange_) / 1048576.0);
         return buf;
     }
+
+    std::string identity() const override { return identity_; }
 
     std::string profile(int h, int w) override {
         if (lost_) return "the GPU was lost earlier";
@@ -251,6 +272,9 @@ public:
 
     Status run(const float* in, int h, int w, float* out, const std::atomic<bool>* cancel, std::string* error) override {
         if (lost_) return fail(error, "the GPU was lost earlier", Status::DeviceLost);
+        if (pipelines_[static_cast<int>(convKernel(variant_))] == VK_NULL_HANDLE) {
+            return fail(error, "this kernel variant is not available on this device", Status::Error);
+        }
         Compiled* c = compiled(h, w, error);
         if (!c) return Status::Error;
         const Program& p = c->program;
@@ -530,7 +554,7 @@ private:
     uint32_t family_;
     std::unique_ptr<Plan> plan_;
     size_t maxRange_ = 0;
-    std::string deviceName_;
+    std::string deviceName_, identity_;
     static constexpr int kPipelines = 5;
     VkShaderModule shaders_[kPipelines] = {};
     VkPipeline pipelines_[kPipelines] = {};

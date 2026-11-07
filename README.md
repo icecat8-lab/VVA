@@ -96,7 +96,12 @@ Notes:
 
 When a model is loaded, the engine tests the GPU path once: it runs a small image on both the GPU and the CPU,
 compares the results and compares the speed. The GPU is used only if the results agree and it is clearly faster.
-If a driver crashes during that test, a marker file (`<model>.gpuprobe`) keeps the GPU off on the next start.
+The kernel is chosen on the device itself: three variants of the convolution are tried and the fastest correct one
+is used, so no GPU model is assumed. The verdict is remembered per GPU and driver in `<model>.gpucfg` (valid for 30
+days), which avoids repeating the tuning at every start; delete the file to test again. If a driver crashes during
+that test, a marker file (`<model>.gpuprobe`) keeps the GPU off on the next start. `getGpuStatus()` /
+`vva-cli info` show the GPU, vendor, driver and Vulkan versions and the speed of each variant; please include that
+line when reporting a problem.
 If the GPU fails while a job is running, the job finishes on the CPU instead of failing.
 
 ```java
@@ -141,6 +146,8 @@ python3 tests/test_converter.py
 python3 tests/test_engine.py
 python3 tests/test_gpu_plan.py
 python3 tests/check_jni.py
+python3 tests/check_glsl.py
+python3 tests/test_gen_spirv.py
 ```
 
 They compile the real C++ sources with AddressSanitizer and UBSan and compare every operator, the

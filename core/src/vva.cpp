@@ -147,6 +147,80 @@ size_t currentAutoBudget() {
     return autoBudgetBytes(parseMemAvailableKb(buf));
 }
 
+// ---- what the GPU self-test learned about this device (stored next to the model) ----
+
+struct GpuConfig {
+    std::string identity;
+    bool usable = false;
+    int variant = 0;
+    std::string reason;
+    long long when = 0;
+};
+
+std::string formatGpuConfig(const GpuConfig& c) {
+    std::string s = "vva-gpu-config 1\n";
+    s += "identity=" + c.identity + "\n";
+    s += std::string("usable=") + (c.usable ? "1" : "0") + "\n";
+    s += "variant=" + std::to_string(c.variant) + "\n";
+    s += "reason=" + c.reason + "\n";
+    s += "time=" + std::to_string(c.when) + "\n";
+    return s;
+}
+
+bool parseGpuConfig(const std::string& text, GpuConfig& c) {
+    c = GpuConfig();
+    if (text.compare(0, 17, "vva-gpu-config 1\n") != 0) return false;
+    size_t pos = 17;
+    bool haveIdentity = false, haveUsable = false;
+    while (pos < text.size()) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        const std::string line = text.substr(pos, end - pos);
+        pos = end + 1;
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = line.substr(0, eq), value = line.substr(eq + 1);
+        if (key == "identity") {
+            c.identity = value;
+            haveIdentity = true;
+        } else if (key == "usable") {
+            c.usable = value == "1";
+            haveUsable = value == "1" || value == "0";
+        } else if (key == "variant") {
+            c.variant = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
+        } else if (key == "reason") {
+            c.reason = value.substr(0, 200);
+        } else if (key == "time") {
+            c.when = std::strtoll(value.c_str(), nullptr, 10);
+        }
+    }
+    return haveIdentity && haveUsable;
+}
+
+// A remembered result is valid for the same GPU and driver, for 30 days.
+bool gpuConfigFresh(const GpuConfig& c, const std::string& identity, int variants, long long nowSeconds) {
+    if (c.identity != identity || c.variant < 0 || c.variant >= variants) return false;
+    const long long age = nowSeconds - c.when;
+    return age >= 0 && age <= 30LL * 24 * 3600;
+}
+
+bool readTextFile(const std::string& path, std::string& text) {
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return false;
+    char buf[4096];
+    const size_t n = std::fread(buf, 1, sizeof(buf), f);
+    std::fclose(f);
+    text.assign(buf, n);
+    return true;
+}
+
+void writeTextFile(const std::string& path, const std::string& text) {
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return;  // a read-only folder just means the result is not remembered
+    std::fwrite(text.data(), 1, text.size(), f);
+    std::fclose(f);
+}
+
 inline float clamp01(float v) {
     if (!(v > 0.f)) return 0.f;  // also maps NaN to 0
     if (v > 1.f) return 1.f;
@@ -202,6 +276,7 @@ public:
     std::mutex runMutex;  // one job (or model load) at a time
     std::atomic<bool> cancelFlag{false};
 
+    std::string modelPath;
     int classifierSize = 0;  // square input size of a classifier model (0 for image models)
 
     int tileSize = 0;
@@ -284,6 +359,7 @@ public:
             return false;
         }
         gpuBackend.reset();  // it points into the previous model
+        modelPath = path;
         model = std::move(loaded);
         exec = std::move(prepared);
         classifierSize = size;
@@ -309,9 +385,10 @@ public:
         }
     }
 
-    // Runs the backend against the CPU executor, for every kernel variant. Keeps the fastest variant that is
-    // correct. Returns an empty string on success, otherwise the reason.
-    std::string verifyBackend(bool checkSpeed, std::string* detail) {
+    // Runs the backend against the CPU executor, for every kernel variant (or only `onlyVariant` when it is >= 0).
+    // Keeps the fastest variant that is correct. Returns an empty string on success, otherwise the reason;
+    // `shortReason` is set when the verdict is stable enough to remember (wrong results, not faster than the CPU).
+    std::string verifyBackend(bool checkSpeed, int onlyVariant, std::string* detail, int* chosen, std::string* shortReason) {
         const int ch = exec->inChannels();
         const int h1 = 20, w1 = 24;
         std::vector<float> in(static_cast<size_t>(ch) * h1 * w1);
@@ -329,9 +406,10 @@ public:
         double range = 1.0;
         for (size_t i = 0; i < outN; ++i) range = std::max(range, static_cast<double>(std::fabs(cpu[i])));
 
+        const bool measure = checkSpeed && onlyVariant < 0;
         const int h2 = 48, w2 = 48;
         std::vector<float> in2, out2;
-        if (checkSpeed) {
+        if (measure) {
             in2.assign(static_cast<size_t>(ch) * h2 * w2, 0.f);
             fillProbe(in2, 11);
             Shape os2;
@@ -340,15 +418,19 @@ public:
         }
 
         const int variants = std::max(1, gpuBackend->variantCount());
+        const int lo = onlyVariant >= 0 ? onlyVariant : 0;
+        const int hi = onlyVariant >= 0 ? onlyVariant + 1 : variants;
         int best = -1;
         double bestRate = 0.0;
         std::string problem, rates;
-        for (int v = 0; v < variants; ++v) {
+        bool wrongOnly = true;
+        for (int v = lo; v < hi; ++v) {
             gpuBackend->setVariant(v);
             err.clear();
             const gpu::Backend::Status st = gpuBackend->run(in.data(), h1, w1, gpuOut.data(), nullptr, &err);
             if (st != gpu::Backend::Status::Ok) {
                 problem = "the GPU test run failed: " + err;
+                wrongOnly = false;
                 if (st == gpu::Backend::Status::DeviceLost) break;
                 continue;
             }
@@ -362,14 +444,16 @@ public:
                 continue;
             }
             double rate = 0.0;
-            if (checkSpeed) {
+            if (measure) {
                 if (gpuBackend->run(in2.data(), h2, w2, out2.data(), nullptr, &err) != gpu::Backend::Status::Ok) {  // warm-up
                     problem = "the GPU speed test failed: " + err;
+                    wrongOnly = false;
                     continue;
                 }
                 const double t1 = now();
                 if (gpuBackend->run(in2.data(), h2, w2, out2.data(), nullptr, &err) != gpu::Backend::Status::Ok) {
                     problem = "the GPU speed test failed: " + err;
+                    wrongOnly = false;
                     continue;
                 }
                 rate = (static_cast<double>(h2) * w2) / std::max(now() - t1, 1e-6);
@@ -382,28 +466,74 @@ public:
                 bestRate = rate;
             }
         }
-        if (best < 0) return problem.empty() ? "no GPU kernel passed the self-test" : problem;
+        if (best < 0) {
+            if (wrongOnly && !problem.empty()) *shortReason = "gave wrong results";
+            return problem.empty() ? "no GPU kernel passed the self-test" : problem;
+        }
         gpuBackend->setVariant(best);
-        if (!checkSpeed) {
-            *detail = "self-test passed";
+        *chosen = best;
+        if (!measure) {
+            *detail = onlyVariant >= 0 ? std::string("kernel ") + gpu::convVariantName(best) + ", remembered for this device"
+                                       : std::string("self-test passed");
             return std::string();
         }
         const double cpuRate = (static_cast<double>(h1) * w1) / std::max(cpuSeconds, 1e-6);
         char buf[200];
         std::snprintf(buf, sizeof(buf), "kernel %s [px/s: %s]; CPU %.0f px/s", gpu::convVariantName(best), rates.c_str(), cpuRate);
         *detail = buf;
-        if (bestRate < 1.3 * cpuRate) return std::string("the GPU is not faster than the CPU on this device (") + buf + ")";
+        if (bestRate < 1.3 * cpuRate) {
+            *shortReason = std::string("not faster than the CPU (") + buf + ")";
+            return std::string("the GPU is not faster than the CPU on this device (") + buf + ")";
+        }
         return std::string();
     }
 
     void finishGpuSetup(bool checkSpeed) {
-        std::string detail;
-        const std::string problem = verifyBackend(checkSpeed, &detail);
+        const std::string identity = gpuBackend->identity();
+        const std::string cachePath = (checkSpeed && !modelPath.empty()) ? modelPath + ".gpucfg" : std::string();
+        GpuConfig cfg;
+        bool cached = false;
+        if (!cachePath.empty()) {
+            std::string text;
+            cached = readTextFile(cachePath, text) && parseGpuConfig(text, cfg) &&
+                     gpuConfigFresh(cfg, identity, std::max(1, gpuBackend->variantCount()), static_cast<long long>(std::time(nullptr)));
+        }
+        if (cached && !cfg.usable) {
+            gpuBackend.reset();
+            gpuState = "not used (an earlier test on this device found it " + cfg.reason + "; delete " + cachePath + " to test again)";
+            return;
+        }
+        std::string detail, shortReason, problem;
+        int chosen = 0;
+        if (cached) {
+            problem = verifyBackend(checkSpeed, cfg.variant, &detail, &chosen, &shortReason);
+            if (!problem.empty()) cached = false;  // the remembered kernel no longer works: test everything again
+        }
+        if (!cached) {
+            shortReason.clear();
+            problem = verifyBackend(checkSpeed, -1, &detail, &chosen, &shortReason);
+        }
         if (!problem.empty()) {
             gpuBackend.reset();
             gpuState = problem;
-        } else {
-            gpuState = "active (" + detail + "; " + gpuBackend->describe() + ")";
+            if (!cachePath.empty() && !shortReason.empty()) {
+                GpuConfig neg;
+                neg.identity = identity;
+                neg.usable = false;
+                neg.reason = shortReason;
+                neg.when = static_cast<long long>(std::time(nullptr));
+                writeTextFile(cachePath, formatGpuConfig(neg));
+            }
+            return;
+        }
+        gpuState = "active (" + detail + "; " + gpuBackend->describe() + ")";
+        if (!cachePath.empty() && !cached) {
+            GpuConfig pos;
+            pos.identity = identity;
+            pos.usable = true;
+            pos.variant = chosen;
+            pos.when = static_cast<long long>(std::time(nullptr));
+            writeTextFile(cachePath, formatGpuConfig(pos));
         }
     }
 

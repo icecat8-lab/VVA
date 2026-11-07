@@ -31,6 +31,8 @@ jobs:
           /tmp/venv/bin/python tests/test_engine.py
           /tmp/venv/bin/python tests/test_gpu_plan.py
           /tmp/venv/bin/python tests/check_jni.py
+          /tmp/venv/bin/python tests/check_glsl.py
+          /tmp/venv/bin/python tests/test_gen_spirv.py
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -57,11 +59,8 @@ jobs:
           test -d "$NDK" || { echo "::error::NDK not found at $NDK"; exit 1; }
           echo "NDK=$NDK" >> "$GITHUB_ENV"
 
-      - name: Compile GPU kernels (optional)
-        continue-on-error: true
-        run: |
-          python3 tools/gen_spirv.py --glslc "$NDK/shader-tools/linux-x86_64/glslc" \
-            || { echo "::warning::GPU kernels were not built; the library will run on the CPU only"; rm -f core/src/gpu/spirv_data.h; }
+      - name: Compile GPU kernels
+        run: python3 tools/gen_spirv.py --glslc "$NDK/shader-tools/linux-x86_64/glslc"
 
       - name: Build AAR
         run: gradle :vva-android:assembleRelease --no-daemon --stacktrace
@@ -77,6 +76,15 @@ jobs:
             -DVVA_BUILD_SHARED=ON \
             -DVVA_BUILD_CLI=ON
           cmake --build build-native --parallel
+
+      - name: Check that the binaries contain the GPU path
+        run: |
+          CLI="$(find . -name vva-cli -type f -not -path './dist/*' | head -1)"
+          test -n "$CLI" || { echo "::error::vva-cli was not found"; exit 1; }
+          if strings "$CLI" | grep -q "this build has no GPU kernels"; then
+            echo "::error::this build has no GPU kernels; refusing to publish a CPU-only release"
+            exit 1
+          fi
 
       - name: Build GPU benchmark (optional)
         continue-on-error: true

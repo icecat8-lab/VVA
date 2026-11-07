@@ -33,6 +33,8 @@ public:
     virtual Status run(const float* in, int h, int w, float* out, const std::atomic<bool>* cancel, std::string* error) = 0;
     // One line about the device and its limits (for status messages).
     virtual std::string describe() const = 0;
+    // Stable text identifying the GPU and its driver (used to remember test results per device).
+    virtual std::string identity() const = 0;
     // Runs an h x w image with one submit per command and reports where the time goes. Diagnostic only.
     virtual std::string profile(int h, int w) = 0;
     // Convolution kernel variants (see convVariantName()); the engine picks the fastest correct one at start-up.

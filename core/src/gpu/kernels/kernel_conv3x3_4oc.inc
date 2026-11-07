@@ -1,10 +1,10 @@
 // 3x3 convolution computing 4 pixels x 4 output channels per invocation (fewer registers, more invocations).
-// The 8-channel weight blocks are shared with the other variants: z = 2 * block + half.
+// The 8-channel weight blocks are shared with the other variants: z = 2 * block + hb.
 int x0 = int(gl_GlobalInvocationID.x) * 4;
 int y = int(gl_GlobalInvocationID.y) + P_YBASE;
 int g = int(gl_GlobalInvocationID.z);
 int ocb = g / 2;
-int half = g - ocb * 2;
+int hb = g - ocb * 2;
 if (x0 >= P_W || y >= P_H) {
     return;
 }
@@ -14,7 +14,7 @@ vec4 a1 = vec4(0.0);
 vec4 a2 = vec4(0.0);
 vec4 a3 = vec4(0.0);
 for (int ic = 0; ic < P_CIN; ++ic) {
-    int wBase = (ocb * P_CIN + ic) * 18 + half;
+    int wBase = (ocb * P_CIN + ic) * 18 + hb;
     int rBase = ic * P_PLANE + y * pw + x0;
     for (int ky = 0; ky < 3; ++ky) {
         int r = rBase + ky * pw;
@@ -34,8 +34,8 @@ for (int ic = 0; ic < P_CIN; ++ic) {
         a3 += v3 * w0 + v4 * w1 + v5 * w2;
     }
 }
-vec4 b = wgt[P_BIAS + ocb * 2 + half];
-int base = (ocb * 8 + half * 4) * P_PLANE + (y + 1) * pw + x0 + 1;
+vec4 b = wgt[P_BIAS + ocb * 2 + hb];
+int base = (ocb * 8 + hb * 4) * P_PLANE + (y + 1) * pw + x0 + 1;
 vva_out4(base, x0, a0 + b);
 vva_out4(base + 1, x0 + 1, a1 + b);
 vva_out4(base + 2, x0 + 2, a2 + b);
