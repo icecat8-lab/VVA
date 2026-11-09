@@ -8,8 +8,6 @@ namespace vva {
 namespace gpu {
 namespace {
 
-// ---- GLSL shim ---------------------------------------------------------------------------------------
-
 struct vec4 {
     float x, y, z, w;
     vec4() : x(0), y(0), z(0), w(0) {}
@@ -65,7 +63,6 @@ uvec3 gl_GlobalInvocationID;
 
 #include "kernels/kernel_common.inc"
 
-// ---- convolution ---------------------------------------------------------------------------------------
 #define P_CIN p.i0
 #define P_H p.i1
 #define P_W p.i2
@@ -95,7 +92,6 @@ void emuConv8px() {
 #undef P_ALPHA
 #undef P_SCALE
 
-// ---- element-wise ---------------------------------------------------------------------------------------
 #define P_COUNT p.i0
 #define P_HASB p.i1
 #define P_GRIDW p.i2
@@ -110,7 +106,6 @@ void emuElt() {
 #undef P_ALPHA
 #undef P_SCALE
 
-// ---- resize ---------------------------------------------------------------------------------------------
 #define P_H p.i0
 #define P_W p.i1
 #define P_SH p.i2
@@ -127,7 +122,7 @@ void emuResize() {
 #undef P_PLANEIN
 #undef P_PLANEOUT
 
-}  // namespace
+}
 
 bool Emulator::run(const Program& prog, const float* in, float* out, std::string* error) {
     auto fail = [&](const std::string& m) {
@@ -135,7 +130,6 @@ bool Emulator::run(const Program& prog, const float* in, float* out, std::string
         return false;
     };
     try {
-        // Memory is zeroed whenever the layout changes, because borders rely on never-written zeros.
         if (prog.h != lastH_ || prog.w != lastW_ || prog.arenaBytes != lastBytes_) {
             arena_.assign(prog.arenaBytes / sizeof(float), 0.f);
             lastH_ = prog.h;
@@ -161,7 +155,6 @@ bool Emulator::run(const Program& prog, const float* in, float* out, std::string
                              reinterpret_cast<const char*>(arena_.data()) + cmd.copySrc, cmd.copyBytes);
                 continue;
             }
-            // Bind buffers.
             Buf<const float>* floatReads[4] = {&src, nullptr, nullptr, &res};
             (void)floatReads;
             auto arenaRange = [&](const Bind& b, bool& ok) {
@@ -224,5 +217,5 @@ bool Emulator::run(const Program& prog, const float* in, float* out, std::string
     }
 }
 
-}  // namespace gpu
-}  // namespace vva
+}
+}

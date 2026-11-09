@@ -114,7 +114,7 @@ bool parseIoList(const json::Value* list, const char* what, std::vector<IoInfo>&
     return true;
 }
 
-}  // namespace
+}
 
 uint32_t crc32(const uint8_t* data, size_t size) {
     static const CrcTable table;
@@ -207,7 +207,6 @@ bool Model::parse(const uint8_t* base, size_t size, std::string* error) {
         return fail(error, "unsupported metadata version (this reader supports version 2)");
     }
 
-    // Optional descriptive block.
     if (const json::Value* meta = root.find("meta")) {
         if (!meta->isObject()) return fail(error, "'meta' must be an object");
         if (const json::Value* n = meta->find("name")) {
@@ -256,7 +255,6 @@ bool Model::parse(const uint8_t* base, size_t size, std::string* error) {
     if (!parseIoList(root.find("inputs"), "inputs", inputs_, error)) return false;
     if (!parseIoList(root.find("outputs"), "outputs", outputs_, error)) return false;
 
-    // Tensors (constants stored in the data block).
     const json::Value* tensorList = root.find("tensors");
     if (!tensorList || !tensorList->isArray()) return fail(error, "'tensors' must be an array");
     if (tensorList->array.size() > kMaxEntries) return fail(error, "too many tensors");
@@ -298,7 +296,6 @@ bool Model::parse(const uint8_t* base, size_t size, std::string* error) {
         tensors_.push_back(std::move(t));
     }
 
-    // Graph nodes: single static assignment, topologically ordered.
     const json::Value* nodeList = root.find("nodes");
     if (!nodeList || !nodeList->isArray() || nodeList->array.empty()) {
         return fail(error, "'nodes' must be a non-empty array");
@@ -349,4 +346,4 @@ bool Model::parse(const uint8_t* base, size_t size, std::string* error) {
     return true;
 }
 
-}  // namespace vva
+}

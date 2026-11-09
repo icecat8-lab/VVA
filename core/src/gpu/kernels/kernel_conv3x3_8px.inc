@@ -1,5 +1,3 @@
-// 3x3 convolution computing 8 pixels x 8 output channels per invocation (fewer weight loads per multiply-add).
-// Same data layout and epilogue as kernel_conv3x3.inc.
 int x0 = int(gl_GlobalInvocationID.x) * 8;
 int y = int(gl_GlobalInvocationID.y) + P_YBASE;
 int ocb = int(gl_GlobalInvocationID.z);

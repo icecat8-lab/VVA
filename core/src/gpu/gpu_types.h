@@ -1,8 +1,3 @@
-// Data shared by the GPU planner, the Vulkan runtime and the host emulator used in tests.
-//
-// A Program is a flat list of commands (dispatches and buffer copies) for one image size. It refers to
-// memory only through byte offsets into one "arena" buffer (activations) and one weights buffer, so it
-// can be executed by Vulkan or replayed on the host.
 #ifndef VVA_GPU_TYPES_H
 #define VVA_GPU_TYPES_H
 
@@ -13,7 +8,6 @@
 namespace vva {
 namespace gpu {
 
-// The three convolution kernels differ only in how much each invocation computes; they share data layout and weights.
 enum class Kernel : int { Conv3x3 = 0, Eltwise = 1, Resize = 2, Conv3x3_4oc = 3, Conv3x3_8px = 4 };
 
 constexpr int kConvVariants = 3;
@@ -24,16 +18,15 @@ inline const char* convVariantName(int variant) {
     return variant == 1 ? "4px x 4ch" : (variant == 2 ? "8px x 8ch" : "4px x 8ch");
 }
 
-// Push constants, identical for every kernel (the kernels give the fields their own names).
 struct Push {
     int32_t i[8];
     float f[2];
 };
 
 struct Bind {
-    int buffer = 0;     // 0 = activation arena, 1 = weights
-    size_t offset = 0;  // bytes, multiple of 256
-    size_t size = 0;    // bytes
+    int buffer = 0;
+    size_t offset = 0;
+    size_t size = 0;
 };
 
 struct Command {
@@ -42,7 +35,7 @@ struct Command {
     Push push{};
     Bind bind[4];
     uint32_t gx = 0, gy = 0, gz = 0;
-    size_t copySrc = 0, copyDst = 0, copyBytes = 0;  // kCopy: arena to arena
+    size_t copySrc = 0, copyDst = 0, copyBytes = 0;
     double flops = 0;
 };
 
@@ -51,20 +44,18 @@ struct Program {
     int inChannels = 0, outChannels = 0;
     std::vector<Command> commands;
     size_t arenaBytes = 0;
-    size_t inputOffset = 0, outputOffset = 0;  // bytes
-    size_t inPlane = 0, outPlane = 0;          // floats between channel planes
+    size_t inputOffset = 0, outputOffset = 0;
+    size_t inPlane = 0, outPlane = 0;
     size_t maxBindBytes = 0;
     double flops = 0;
 };
 
-// Every activation plane is stored with a one-pixel zero border; planes are padded to a multiple of
-// 64 floats so that tensor offsets stay 256-byte aligned and borders line up when memory is reused.
 inline size_t planeFloats(int h, int w) {
     const size_t p = static_cast<size_t>(h + 2) * static_cast<size_t>(w + 2);
     return (p + 63) / 64 * 64;
 }
 
-}  // namespace gpu
-}  // namespace vva
+}
+}
 
 #endif

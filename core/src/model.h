@@ -20,13 +20,13 @@ struct TensorInfo {
     std::string name;
     DType dtype = DType::F32;
     std::vector<int64_t> shape;
-    uint64_t offset = 0;  // bytes, relative to the start of the data blob
-    uint64_t size = 0;    // bytes
+    uint64_t offset = 0;
+    uint64_t size = 0;
 };
 
 struct IoInfo {
     std::string name;
-    std::vector<int64_t> shape;  // -1 marks a dynamic dimension
+    std::vector<int64_t> shape;
 };
 
 struct Node {
@@ -34,16 +34,13 @@ struct Node {
     std::string name;
     std::vector<std::string> inputs;
     std::vector<std::string> outputs;
-    json::Value attrs;  // always a JSON object
+    json::Value attrs;
 };
 
-// CRC-32 (ISO-HDLC, the same as zlib.crc32 / Python binascii.crc32).
 uint32_t crc32(const uint8_t* data, size_t size);
 
 class Model {
 public:
-    // Memory-maps and validates a .vva v2 file. On failure returns nullptr and
-    // fills `error` (if not null) with a human-readable message.
     static std::unique_ptr<Model> load(const std::string& path, std::string* error);
 
     ~Model();
@@ -51,11 +48,9 @@ public:
     Model& operator=(const Model&) = delete;
 
     const std::string& name() const { return name_; }
-    int scale() const { return scale_; }  // 1 when the model does not declare one
+    int scale() const { return scale_; }
 
-    // meta.task: "image" (default, image in / image out) or "classify" (image in / class scores out).
     const std::string& task() const { return task_; }
-    // Classifier settings (meta.classes, meta.input_size, meta.mean, meta.std); defaults when absent.
     const std::vector<std::string>& classes() const { return classes_; }
     int inputSize() const { return inputSize_; }
     const float* mean() const { return mean_; }
@@ -67,7 +62,6 @@ public:
 
     const TensorInfo* findTensor(const std::string& name) const;
 
-    // Pointer into the memory map; 64-byte aligned; valid while the Model lives.
     const uint8_t* tensorData(const TensorInfo& tensor) const { return data_ + tensor.offset; }
 
     uint64_t dataSize() const { return dataSize_; }
@@ -95,6 +89,6 @@ private:
     std::vector<Node> nodes_;
 };
 
-}  // namespace vva
+}
 
-#endif  // VVA_MODEL_H
+#endif

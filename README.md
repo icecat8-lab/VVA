@@ -166,7 +166,6 @@ cli/           command-line tool
 python/        converter, .vva reader and writer, numpy reference
 docs/FORMAT.md description of the .vva format
 tests/         host tests
-experimental/  unfinished GPU and NPU code (not built)
 ```
 
 ## License

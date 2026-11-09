@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""Converter tests: checkpoint -> .vva v2, numerical verification and error handling.
-
-Run from the repository root:  python3 tests/test_converter.py
-"""
 
 import io
 import os
@@ -12,22 +8,20 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import Checker, WORK, make_rrdbnet_state, save_npz  # noqa: E402
+from common import Checker, WORK, make_rrdbnet_state, save_npz
 
-from vva import cli  # noqa: E402
-from vva.converter import ConversionError, _unwrap, build_rrdbnet, inspect_rrdbnet, load_checkpoint  # noqa: E402
-from vva.fileformat import read_vva  # noqa: E402
-from vva.reference import rrdbnet_forward, run_graph  # noqa: E402
+from vva import cli
+from vva.converter import ConversionError, _unwrap, build_rrdbnet, inspect_rrdbnet, load_checkpoint
+from vva.fileformat import read_vva
+from vva.reference import rrdbnet_forward, run_graph
 
 T = Checker("test_converter")
-
 
 def run_cli(args):
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         code = cli.main(args)
     return code, out.getvalue(), err.getvalue()
-
 
 def main():
     sd = make_rrdbnet_state(nf=6, gc=5, nb=2, seed=3)
@@ -119,7 +113,6 @@ def main():
         pass
 
     return T.finish()
-
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -5,56 +5,24 @@ import android.hardware.HardwareBuffer;
 
 import java.util.Arrays;
 
-/**
- * Super-resolution engine for {@code .vva} models.
- *
- * <p>Typical use (call from a background thread, never the UI thread):
- *
- * <pre>
- * try (VVAEngine engine = new VVAEngine()) {
- *     if (!engine.init(modelFile.getAbsolutePath())) {
- *         Log.e("VVA", engine.getLastError());
- *         return;
- *     }
- *     Bitmap big = engine.upscale(photo, fraction -&gt; !cancelled);
- * }
- * </pre>
- *
- * <p>Two kinds of model are supported: image models ({@link #upscale}) and classifiers
- * ({@link #classify}), for example to choose between two upscaling models. {@link #isClassifier()}
- * tells which kind was loaded.
- *
- * <p>Processing runs on the CPU with several threads. Large images are split into
- * tiles automatically so memory stays within {@link #setMemoryBudgetMb(int)}.
- * {@link #cancel()} may be called from any thread.
- */
 public final class VVAEngine implements AutoCloseable {
 
     static {
         System.loadLibrary("vva_engine");
     }
 
-    /** Choose the GPU when it passed its self-test and is faster, otherwise the CPU (the default). */
     public static final int DEVICE_AUTO = 0;
-    /** Always use the CPU. */
     public static final int DEVICE_CPU = 1;
-    /** Require the GPU; processing fails when it is unavailable. */
     public static final int DEVICE_GPU = 2;
 
-    /** Receives progress after every tile. Return {@code false} to cancel the job. */
     public interface ProgressListener {
         boolean onProgress(float fraction);
     }
 
-    /** Result of {@link #classify}. */
     public static final class Classification {
-        /** Most likely class. */
         public final int index;
-        /** Its probability, 0..1. */
         public final float confidence;
-        /** Class name from the model, or "class N" when the model has no names. */
         public final String label;
-        /** One probability per class; they sum to 1. */
         public final float[] probabilities;
 
         Classification(int index, float confidence, String label, float[] probabilities) {
@@ -65,8 +33,8 @@ public final class VVAEngine implements AutoCloseable {
         }
     }
 
-    private final Object runLock = new Object();     // one job / model load at a time
-    private final Object handleLock = new Object();  // protects {@link #handle}
+    private final Object runLock = new Object();
+    private final Object handleLock = new Object();
     private long handle;
     private volatile int scale;
     private volatile boolean classifier;
@@ -79,7 +47,6 @@ public final class VVAEngine implements AutoCloseable {
         }
     }
 
-    /** Loads a {@code .vva} model from a file path. On failure the previous model stays active. */
     public boolean init(String modelPath) {
         synchronized (runLock) {
             long h = currentHandle();
@@ -97,26 +64,22 @@ public final class VVAEngine implements AutoCloseable {
         }
     }
 
-    /** Upscale factor of the loaded model (for example 4), or 0 when no model is loaded. */
     public int getScale() {
         return scale;
     }
 
-    /** Selects where image models run: {@link #DEVICE_AUTO}, {@link #DEVICE_CPU} or {@link #DEVICE_GPU}. */
     public void setDevice(int device) {
         synchronized (handleLock) {
             if (handle != 0) nativeSetDevice(handle, device);
         }
     }
 
-    /** {@link #DEVICE_CPU} or {@link #DEVICE_GPU}: where the last job ran (CPU when it had to fall back). */
     public int getLastDevice() {
         synchronized (handleLock) {
             return handle == 0 ? DEVICE_CPU : nativeLastDevice(handle);
         }
     }
 
-    /** One line explaining whether the GPU is active for the loaded model and why not otherwise. */
     public String getGpuStatus() {
         synchronized (handleLock) {
             if (handle == 0) return "the engine is closed";
@@ -125,12 +88,10 @@ public final class VVAEngine implements AutoCloseable {
         }
     }
 
-    /** True when the loaded model is a classifier (use {@link #classify}); false for image models. */
     public boolean isClassifier() {
         return classifier;
     }
 
-    /** Human readable reason for the last failure. */
     public String getLastError() {
         String local = javaError;
         if (local != null) {
@@ -141,42 +102,36 @@ public final class VVAEngine implements AutoCloseable {
         }
     }
 
-    /** Tile size in input pixels; 0 (default) chooses from the memory budget. */
     public void setTileSize(int pixels) {
         synchronized (handleLock) {
             if (handle != 0) nativeSetTileSize(handle, pixels);
         }
     }
 
-    /** Overlap read around each tile in pixels (default 16). */
     public void setTilePad(int pixels) {
         synchronized (handleLock) {
             if (handle != 0) nativeSetTilePad(handle, pixels);
         }
     }
 
-    /** Worker threads; 0 (default) picks automatically (up to 8). */
     public void setThreads(int threads) {
         synchronized (handleLock) {
             if (handle != 0) nativeSetThreads(handle, threads);
         }
     }
 
-    /** Working memory for one tile in MB. By default it is chosen from the free RAM (320 to 768 MB); lower it on devices with little RAM. */
     public void setMemoryBudgetMb(int megabytes) {
         synchronized (handleLock) {
             if (handle != 0) nativeSetMemoryBudgetMb(handle, megabytes);
         }
     }
 
-    /** Stops the running job as soon as possible. Safe to call from any thread. */
     public void cancel() {
         synchronized (handleLock) {
             if (handle != 0) nativeCancel(handle);
         }
     }
 
-    /** Vulkan diagnostics only; processing does not need it. */
     public boolean hasVulkan() {
         synchronized (handleLock) {
             return handle != 0 && nativeHasVulkan(handle);
@@ -191,10 +146,6 @@ public final class VVAEngine implements AutoCloseable {
         }
     }
 
-    /**
-     * Upscales {@code src} and returns a new ARGB_8888 bitmap, or {@code null} on failure or
-     * cancellation (see {@link #getLastError()}). Any bitmap configuration is accepted.
-     */
     public Bitmap upscale(Bitmap src, ProgressListener listener) {
         if (src == null) {
             javaError = "bitmap is null";
@@ -249,11 +200,6 @@ public final class VVAEngine implements AutoCloseable {
         }
     }
 
-    /**
-     * Classifies a bitmap with a classifier model: the image is resized to the model's input size and
-     * normalised as stored in the model file. Returns {@code null} on failure (see {@link #getLastError()}).
-     * Any bitmap configuration is accepted. Call it from a background thread.
-     */
     public Classification classify(Bitmap src) {
         if (src == null) {
             javaError = "bitmap is null";
@@ -301,10 +247,6 @@ public final class VVAEngine implements AutoCloseable {
         }
     }
 
-    /**
-     * Upscales {@code in} into {@code out}. Both must be software ARGB_8888 bitmaps and
-     * {@code out} must be exactly {@link #getScale()} times larger.
-     */
     public boolean processBitmap(Bitmap in, Bitmap out, ProgressListener listener) {
         if (in == null || out == null) {
             javaError = "bitmap is null";
@@ -321,13 +263,6 @@ public final class VVAEngine implements AutoCloseable {
         }
     }
 
-    /**
-     * Same as {@link #processBitmap} for {@link HardwareBuffer}s, reading and writing their
-     * memory directly (no Bitmap or Java-heap copies). Both buffers must be single-layer
-     * RGBA_8888; allocate the input with USAGE_CPU_READ_OFTEN and the output with
-     * USAGE_CPU_WRITE_OFTEN. Colours are treated as non-premultiplied. This is CPU access,
-     * not GPU zero-copy.
-     */
     public boolean processZeroCopy(HardwareBuffer in, HardwareBuffer out, ProgressListener listener) {
         if (in == null || out == null) {
             javaError = "HardwareBuffer is null";
@@ -348,7 +283,6 @@ public final class VVAEngine implements AutoCloseable {
         return processZeroCopy(in, out, null);
     }
 
-    /** Cancels any running job and releases the native engine. Safe to call more than once. */
     @Override
     public void close() {
         cancel();

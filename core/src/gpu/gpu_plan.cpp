@@ -10,8 +10,8 @@ namespace gpu {
 
 namespace {
 
-double gDispatchFlops = 1.0e9;  // target work per dispatch (rows of a convolution are split to fit)
-double gSegmentFlops = 4.0e9;   // submit boundary after this much work
+double gDispatchFlops = 1.0e9;
+double gSegmentFlops = 4.0e9;
 
 float halfBitsToFloat(uint16_t h) {
     const uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
@@ -53,42 +53,42 @@ struct Prim {
     PKind kind = PKind::Add;
     std::vector<int> in;
     int out = -1;
-    float value = 0.f;  // Leaky: alpha, MulS: scalar
+    float value = 0.f;
     int sh = 1, sw = 1;
     int cin = 0, cout = 0;
-    int weightIndex = -1;  // conv: index into convs_
+    int weightIndex = -1;
     bool dead = false;
 };
 
 struct ConvData {
     int cin = 0, cout = 0;
-    size_t offset = 0;  // floats into the weights blob (64-float aligned)
+    size_t offset = 0;
     size_t floats = 0;
-    int biasVec4 = 0;   // bias position in vec4 units relative to `offset`
+    int biasVec4 = 0;
 };
 
 enum class OKind { Conv, Elt, Concat, Resize };
 
 struct Op {
     OKind kind = OKind::Elt;
-    std::vector<int> in;  // conv: [x]; elt: [a] or [a, b]; concat: inputs; resize: [x]
+    std::vector<int> in;
     int out = -1;
-    int conv = -1;                  // index into convs
-    float alpha = 1.f, scale = 1.f;  // conv epilogue / elt
-    int res = -1;                    // conv: residual tensor
+    int conv = -1;
+    float alpha = 1.f, scale = 1.f;
+    int res = -1;
     int sh = 1, sw = 1;
 };
 
 struct Tensor {
     int c = 0;
-    int def = -1;       // op index producing it, -1 for the graph input
+    int def = -1;
     int lastUse = -1;
-    int h = 0, w = 0;   // set per build
+    int h = 0, w = 0;
 };
 
 struct ClassAlloc {
-    size_t unit = 0;  // bytes of one plane
-    std::vector<std::pair<size_t, size_t>> freeList;  // (offset, size), sorted by offset
+    size_t unit = 0;
+    std::vector<std::pair<size_t, size_t>> freeList;
     size_t top = 0;
 
     size_t alloc(size_t bytes) {
@@ -124,13 +124,13 @@ struct ClassAlloc {
     }
 };
 
-}  // namespace
+}
 
 struct Plan::Impl {
     std::vector<float> weights;
     std::vector<ConvData> convs;
     std::vector<Op> ops;
-    std::vector<Tensor> tensors;  // c, def, lastUse filled at create()
+    std::vector<Tensor> tensors;
     int inputTensor = 0, outputTensor = 0;
     int inC = 0, outC = 0, scale = 1;
 };
@@ -160,7 +160,7 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
         return nullptr;
     }
     std::unordered_map<std::string, int> ids;
-    std::vector<int> channels;  // per tensor id
+    std::vector<int> channels;
     ids[input.name] = 0;
     channels.push_back(static_cast<int>(input.shape[1]));
     im.inC = channels[0];
@@ -244,7 +244,6 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
                     }
                 }
             }
-            // Pack: [output block of 8][input channel][tap][8], then the bias; start 256-byte aligned.
             const int ob = (cd.cout + 7) / 8;
             const size_t packed = static_cast<size_t>(ob) * cd.cin * 9 * 8;
             cd.offset = roundUp(im.weights.size(), 64);
@@ -343,7 +342,6 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
             return nullptr;
         }
 
-        // Output channels.
         int oc = 0;
         switch (p.kind) {
             case PKind::Conv: oc = p.cout; break;
@@ -369,7 +367,6 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
     }
     int outputTensor = outIt->second;
 
-    // ---- fusion -------------------------------------------------------------------------------
     const int numTensors = static_cast<int>(channels.size());
     std::vector<int> uses(static_cast<size_t>(numTensors), 0);
     std::vector<int> defPrim(static_cast<size_t>(numTensors), -1);
@@ -463,13 +460,11 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
         ops.push_back(op);
     }
 
-    // A fused chain may have replaced the graph output tensor id by the id of its last member.
     if (!ops.empty() && std::none_of(ops.begin(), ops.end(), [&](const Op& o) { return o.out == outputTensor; })) {
         fail(reason, "internal error: lost the graph output while fusing");
         return nullptr;
     }
 
-    // ---- tensors, liveness and channel rules -------------------------------------------------------
     im.tensors.assign(static_cast<size_t>(numTensors), Tensor());
     for (int t = 0; t < numTensors; ++t) im.tensors[static_cast<size_t>(t)].c = channels[static_cast<size_t>(t)];
     for (size_t k = 0; k < ops.size(); ++k) {
@@ -501,14 +496,13 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
             return nullptr;
         }
     }
-    // Tensors produced by elt/concat/resize must have 8k channels (checked above); the graph input may be anything.
     im.ops = ops;
     im.inputTensor = 0;
     im.outputTensor = outputTensor;
     im.outC = im.tensors[static_cast<size_t>(outputTensor)].c;
     int scaleNum = 1;
     for (const Op& op : ops) {
-        if (op.kind == OKind::Resize) scaleNum *= op.sh;  // checked against the real output size in build()
+        if (op.kind == OKind::Resize) scaleNum *= op.sh;
     }
     im.scale = scaleNum;
     if (ops.empty()) {
@@ -556,9 +550,6 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
     auto plane = [&](int t) { return planeFloats(tensors[static_cast<size_t>(t)].h, tensors[static_cast<size_t>(t)].w); };
     auto bytes = [&](int t) { return c8(t) * plane(t) * sizeof(float); };
 
-    // ---- memory planning: first-fit per plane size, live ranges from `tensors` ------------------------
-    // Memory is shared only between tensors with the same geometry: the zero borders must stay at the same
-    // positions, and two sizes can have equal plane sizes but different row widths.
     auto geometry = [&](int t) {
         return (static_cast<uint64_t>(tensors[static_cast<size_t>(t)].h) << 32) | static_cast<uint64_t>(tensors[static_cast<size_t>(t)].w);
     };
@@ -584,7 +575,7 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
         for (int t : touched) {
             if (tensors[static_cast<size_t>(t)].lastUse == static_cast<int>(k) && t != im.outputTensor) release(t);
         }
-        if (tensors[static_cast<size_t>(op.out)].lastUse < static_cast<int>(k)) release(op.out);  // never used
+        if (tensors[static_cast<size_t>(op.out)].lastUse < static_cast<int>(k)) release(op.out);
     }
     std::unordered_map<uint64_t, size_t> base;
     size_t cursor = 0;
@@ -598,9 +589,8 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
         cursor += ca.top;
     }
     auto offset = [&](int t) { return base[geometry(t)] + rel[static_cast<size_t>(t)]; };
-    prog.arenaBytes = roundUp(cursor, 256) + 256;  // slack: the convolution may read a few floats past a plane
+    prog.arenaBytes = roundUp(cursor, 256) + 256;
 
-    // ---- commands --------------------------------------------------------------------------------------
     double sinceBoundary = 0.0;
     auto bindArena = [&](int t) {
         Bind b;
@@ -736,5 +726,5 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
     return true;
 }
 
-}  // namespace gpu
-}  // namespace vva
+}
+}

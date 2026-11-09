@@ -1,4 +1,3 @@
-// Nearest-neighbour upscaling by integer factors; writes the interior only (borders stay zero).
 int x = int(gl_GlobalInvocationID.x);
 int y = int(gl_GlobalInvocationID.y);
 int c = int(gl_GlobalInvocationID.z);

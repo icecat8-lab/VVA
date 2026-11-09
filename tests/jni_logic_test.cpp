@@ -1,13 +1,9 @@
-// Tests the pixel plumbing of the JNI layer (row strides, premultiplied alpha) on the host.
-// The JNI source is included directly; Android/JNI headers come from tests/stubs.
-//   jni_logic_test <rrdbnet.vva>
 #include <cstdio>
 #include <cmath>
 #include <cstdlib>
 
 #include "../android/vva-android/src/main/cpp/vva_jni.cpp"
 
-// Definitions for the declarations in tests/stubs (never called in this test).
 const char* JNIEnv::GetStringUTFChars(jstring, jboolean*) { return nullptr; }
 void JNIEnv::ReleaseStringUTFChars(jstring, const char*) {}
 jstring JNIEnv::NewStringUTF(const char*) { return nullptr; }
@@ -46,7 +42,6 @@ int main(int argc, char** argv) {
     const size_t inStride = w * 4 + 12, outW = static_cast<size_t>(w) * s, outStride = outW * 4 + 20;
     const int outH = ht * s;
 
-    // Straight RGBA test image with some fully opaque, some translucent pixels.
     std::vector<uint8_t> straight(static_cast<size_t>(w) * ht * 4);
     unsigned seed = 7;
     for (size_t i = 0; i < straight.size(); ++i) {
@@ -61,11 +56,9 @@ int main(int argc, char** argv) {
         return out;
     };
 
-    // Reference: the engine called directly on tightly packed straight data.
     std::vector<uint8_t> ref(outW * outH * 4);
     CHECK(h.engine.processImageTile(straight.data(), w, ht, ref.data(), vva::DeviceType::AUTO), "reference run");
 
-    // 1. straight alpha, padded strides in and out: same pixels, padding bytes untouched.
     {
         std::vector<uint8_t> in = strided(straight, inStride);
         std::vector<uint8_t> out(outStride * outH, 0xCD);
@@ -79,7 +72,6 @@ int main(int argc, char** argv) {
         CHECK(padOk, "row padding is not overwritten");
     }
 
-    // 2. premultiplied in and out: invariant c <= alpha, alpha identical, opaque pixels unchanged.
     {
         std::vector<uint8_t> pre = straight;
         premultiply(pre.data(), static_cast<size_t>(w) * ht);
@@ -101,7 +93,6 @@ int main(int argc, char** argv) {
         CHECK(opaqueSame, "opaque pixels survive the premultiply round trip");
     }
 
-    // 3. opaque image with premultiplied flags: nothing converted, alpha stays 255.
     {
         std::vector<uint8_t> opaque = straight;
         for (int i = 0; i < w * ht; ++i) opaque[i * 4 + 3] = 255;
@@ -112,7 +103,6 @@ int main(int argc, char** argv) {
         CHECK(a, "opaque output stays opaque");
     }
 
-    // 4. premultiply / unpremultiply round trip for reasonably opaque pixels.
     {
         bool ok = true;
         for (unsigned a = 128; a <= 255; ++a) {
@@ -130,14 +120,12 @@ int main(int argc, char** argv) {
         CHECK(zero[0] == 0 && zero[1] == 0 && zero[2] == 0, "alpha 0 clears colour");
     }
 
-    // 5. engine errors surface and leave the handle usable.
     {
         Handle empty;
         std::vector<uint8_t> in(4, 0), out(16 * 4, 0);
         CHECK(!upscaleRgba(&empty, in.data(), 4, 1, 1, out.data(), 4, false, false) && empty.jniError == "no model loaded", "no model: clean failure");
     }
 
-    // 6. classification through the JNI helper (row strides, premultiplied alpha).
     if (argc == 3) {
         Handle c;
         CHECK(c.engine.loadModel(argv[2]) && c.engine.isClassifier(), "classifier loads");

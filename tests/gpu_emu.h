@@ -1,6 +1,3 @@
-// Host replay of a GPU Program. The kernels are the very same source files that become shaders
-// (core/src/gpu/kernels/*.inc); here they are compiled as C++ with a tiny shim for the GLSL types.
-// Buffer accesses are bounds-checked against the bound ranges, like a robust GPU would.
 #ifndef VVA_GPU_EMU_H
 #define VVA_GPU_EMU_H
 
@@ -15,8 +12,6 @@ namespace gpu {
 class Emulator {
 public:
     explicit Emulator(const std::vector<float>& weights) : weights_(weights) {}
-    // in: planar [inChannels][h][w]; out: planar [outChannels][outH][outW]. Returns false with a message on any
-    // out-of-range access or malformed program.
     bool run(const Program& program, const float* in, float* out, std::string* error);
 
 private:
@@ -26,7 +21,7 @@ private:
     size_t lastBytes_ = 0;
 };
 
-}  // namespace gpu
-}  // namespace vva
+}
+}
 
 #endif

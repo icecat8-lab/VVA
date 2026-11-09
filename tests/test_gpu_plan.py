@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""GPU path tests that need no GPU: the planner (fusion, memory layout, weight packing, grids) and the very
-kernel sources that become shaders are replayed on the host and compared with the numpy reference.
-
-Run from the repository root:  python3 tests/test_gpu_plan.py
-"""
 
 import os
 import subprocess
@@ -12,13 +7,12 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import ENV, ROOT, WORK, Checker, VVAWriter, make_rrdbnet_state, read_vva, run, save_npz  # noqa: E402
+from common import ENV, ROOT, WORK, Checker, VVAWriter, make_rrdbnet_state, read_vva, run, save_npz
 
-from vva.converter import convert  # noqa: E402
-from vva.reference import run_graph  # noqa: E402
+from vva.converter import convert
+from vva.reference import run_graph
 
 T = Checker("test_gpu_plan")
-
 
 def build():
     exe = os.path.join(WORK, "gpu_emu_run")
@@ -33,7 +27,6 @@ def build():
         sys.exit("cannot build the emulator")
     return exe
 
-
 def emu(exe, model, x, second=None, variant=0):
     c, h, w = x.shape
     inp, out = os.path.join(WORK, "g_in.f32"), os.path.join(WORK, "g_out.f32")
@@ -47,14 +40,11 @@ def emu(exe, model, x, second=None, variant=0):
     text = (r.stdout + r.stderr).strip()
     return text, (np.fromfile(out, dtype=np.float32) if r.returncode == 0 else None)
 
-
 def rel(a, b):
     return float(np.max(np.abs(a - b))) / max(float(np.max(np.abs(b))), 1e-9)
 
-
 def rnd(rng, *shape, scale=0.3):
     return (rng.randn(*shape) * scale).astype(np.float32)
-
 
 def graphs():
     rng = np.random.RandomState(3)
@@ -73,7 +63,6 @@ def graphs():
         w.add_input("input", [1, c, -1, -1])
         return w
 
-    # 1. epilogue fusion: conv+lrelu, conv+mul+add(residual defined earlier)
     w = new()
     conv(w, "a", 3, 8, "input", "a0")
     w.add_node("LeakyReLU", ["a0"], ["a1"], {"alpha": 0.1})
@@ -84,7 +73,6 @@ def graphs():
     w.add_output("output", [1, 3, -1, -1])
     out["fuse_basic"] = (w, 3)
 
-    # 2. ordering hazard: the Add's other operand is produced after the first convolution
     w = new()
     conv(w, "a", 3, 8, "input", "a0")
     w.add_node("Mul", ["a0"], ["a1"], {"scalar": 2.0})
@@ -95,7 +83,6 @@ def graphs():
     w.add_output("output", [1, 8, -1, -1])
     out["order_hazard"] = (w, 3)
 
-    # 3. concat of three tensors, then convolution, with a tensor used by several consumers
     w = new()
     conv(w, "a", 3, 8, "input", "a0")
     conv(w, "b", 8, 16, "a0", "b0")
@@ -105,7 +92,6 @@ def graphs():
     w.add_output("output", [1, 8, -1, -1])
     out["concat_multi_use"] = (w, 3)
 
-    # 4. nearest resize (including different factors per axis) followed by convolutions
     w = new()
     conv(w, "a", 3, 8, "input", "a0")
     w.add_node("ResizeNearest", ["a0"], ["u"], {"scale": [2, 3]})
@@ -115,7 +101,6 @@ def graphs():
     w.add_output("output", [1, 8, -1, -1])
     out["resize"] = (w, 3)
 
-    # 5. element-wise only operators, x + x, standalone scale and activation, output from an element-wise op
     w = new()
     conv(w, "a", 3, 8, "input", "a0")
     w.add_node("Add", ["a0", "a0"], ["d"])
@@ -126,14 +111,12 @@ def graphs():
     w.add_output("output", [1, 8, -1, -1])
     out["eltwise_mix"] = (w, 3)
 
-    # 6. awkward channel counts that are allowed: 3-channel input, 5-channel and 11-channel conv outputs
     w = new()
     conv(w, "a", 3, 5, "input", "a0")
     conv(w, "b", 5, 11, "a0", "output")
     w.add_output("output", [1, 11, -1, -1])
     out["odd_channels"] = (w, 3)
     return out
-
 
 def main():
     exe = build()
@@ -154,7 +137,7 @@ def main():
             want = run_graph(meta, deq, x.astype(np.float64)).reshape(-1)
             T.check(got.size == want.size and rel(got.astype(np.float64), want) < 5e-5,
                     "nf=%d gc=%d nb=%d %dx%d matches numpy (rel err %.1e)" % (nf, gc, nb, h, w, rel(got.astype(np.float64), want) if got.size == want.size else -1))
-        # Memory layout changes between images: the second run must not see leftovers of the first.
+
         text2, got2 = emu(exe, model, x, second=(h + 5, w + 3))
         T.check(got2 is not None and got is not None and np.array_equal(got, got2), "%dx%d: a previous image of another size leaves no trace" % (h, w))
 
@@ -281,7 +264,6 @@ def main():
         T.check(r.returncode == 0, "engine_gpu_test passes (exit %d) %s" % (r.returncode, (r.stdout + r.stderr)[-400:]))
 
     return T.finish()
-
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -1,1 +1,4 @@
 core/src/gpu/spirv_data.h
+
+/vva-cli
+*.so

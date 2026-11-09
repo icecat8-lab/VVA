@@ -1,5 +1,3 @@
-"""Shared helpers for the VVA tests (no PyTorch needed)."""
-
 import os
 import subprocess
 import sys
@@ -10,11 +8,10 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "python"))
 
-from vva.fileformat import VVAWriter, read_vva  # noqa: E402
-from vva.reference import rrdbnet_forward  # noqa: E402
+from vva.fileformat import VVAWriter, read_vva
+from vva.reference import rrdbnet_forward
 
 WORK = tempfile.mkdtemp(prefix="vva_test_")
-
 
 class Checker:
     def __init__(self, title):
@@ -32,9 +29,7 @@ class Checker:
         print("%s: %d checks, %d failed" % (self.title, self.count, len(self.failures)))
         return 1 if self.failures else 0
 
-
 def make_rrdbnet_state(nf, gc, nb, seed=0, out_std=0.15):
-    """Random but well-behaved basicsr-style RRDBNet weights (float32)."""
     rng = np.random.RandomState(seed)
     sd = {}
 
@@ -51,30 +46,26 @@ def make_rrdbnet_state(nf, gc, nb, seed=0, out_std=0.15):
     for name in ("conv_body", "conv_up1", "conv_up2", "conv_hr"):
         conv(name, nf, nf)
     conv("conv_last", 3, nf)
-    # Sprinkle tiny values so fp16 subnormals are exercised too.
+
     for key in ("conv_first.weight", "conv_hr.weight"):
         flat = sd[key].reshape(-1)
         flat[:4] = [1e-6, -3e-5, 5.9e-5, 6.2e-5]
-    # Centre the output around 0.5 with a visible spread so 8-bit results are informative.
+
     x = np.random.RandomState(seed + 1).rand(3, 6, 7)
     probe = rrdbnet_forward(sd, x)
     sd["conv_last.weight"] *= np.float32(out_std / max(float(np.std(probe)), 1e-6))
     sd["conv_last.bias"][:] = 0.5
     return sd
 
-
 def save_npz(sd, name):
     path = os.path.join(WORK, name)
     np.savez(path, **sd)
     return path if path.endswith(".npz") else path + ".npz"
 
-
 def run(cmd, **kwargs):
     return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
 
-
 def build_binaries(sanitize=True):
-    """Compile the production C++ sources for the host. Returns {name: path}."""
     flags = ["-std=c++17", "-g", "-O1" if sanitize else "-O2", "-DVVA_NO_VULKAN", "-pthread",
              "-I", os.path.join(ROOT, "core", "include"), "-I", os.path.join(ROOT, "core", "src")]
     if sanitize:
@@ -99,12 +90,9 @@ def build_binaries(sanitize=True):
         exes[name] = exe
     return exes
 
-
 ENV = dict(os.environ, ASAN_OPTIONS="exitcode=99:detect_leaks=0", UBSAN_OPTIONS="halt_on_error=1:exitcode=98")
 
-
 def exec_run(exe, model, x, threads=1):
-    """Run the production executor on x [C,H,W]; returns (status_text, output array or None)."""
     c, h, w = x.shape
     inp = os.path.join(WORK, "in.f32")
     out = os.path.join(WORK, "out.f32")
@@ -117,9 +105,7 @@ def exec_run(exe, model, x, threads=1):
         return text, None
     return text, np.fromfile(out, dtype=np.float32)
 
-
 def make_mobilenetv3_small_state(n_classes=2, seed=0, bn_eps=1e-3):
-    """Random but well-behaved torchvision MobileNetV3-Small weights (float32), BatchNorm statistics included."""
     from vva.reference import MBV3_SMALL, mobilenetv3_small_forward
     rng = np.random.RandomState(seed)
     sd = {}
@@ -162,7 +148,7 @@ def make_mobilenetv3_small_state(n_classes=2, seed=0, bn_eps=1e-3):
     sd["classifier.0.bias"] = (rng.randn(1024) * 0.05).astype(np.float32)
     sd["classifier.3.weight"] = (rng.randn(n_classes, 1024) * np.sqrt(1.0 / 1024)).astype(np.float32)
     sd["classifier.3.bias"] = (rng.randn(n_classes) * 0.1).astype(np.float32)
-    # Scale the final layer so the logits have a spread of about one (probabilities stay informative).
+
     x = np.random.RandomState(seed + 1).randn(3, 64, 64)
     probe = mobilenetv3_small_forward({k: np.asarray(v, dtype=np.float64) for k, v in sd.items()}, x, bn_eps)
     sd["classifier.3.weight"] *= np.float32(1.5 / max(float(np.std(probe)), 1e-3))

@@ -18,7 +18,6 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags '-std=c++17'
-                // c++_static: one self-contained libvva_engine.so, no libc++_shared.so to ship.
                 arguments '-DVVA_BUILD_JNI=ON', '-DANDROID_STL=c++_static'
             }
         }

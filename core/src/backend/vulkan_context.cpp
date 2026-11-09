@@ -43,7 +43,6 @@ public:
         std::vector<VkPhysicalDevice> devices(deviceCount);
         vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
 
-        // Pick the first device that has a compute-capable queue family.
         for (VkPhysicalDevice candidate : devices) {
             uint32_t familyCount = 0;
             vkGetPhysicalDeviceQueueFamilyProperties(candidate, &familyCount, nullptr);
@@ -104,4 +103,4 @@ public:
     ~VulkanContext() { destroy(); }
 };
 
-}  // namespace vva
+}

@@ -1,5 +1,3 @@
-// Test helper: runs the engine's classifier resize on a PPM image and dumps the RGB bytes.
-//   resize_test in.ppm SIZE out.rgb
 #include <cstdio>
 #include <cstdlib>
 #include <string>

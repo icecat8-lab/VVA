@@ -1,5 +1,3 @@
-// Test harness: runs a .vva model on raw float32 data with the production executor.
-//   exec_run <model.vva> <in.f32> <C> <H> <W> <out.f32> [threads]
 #include <cstdio>
 #include <cstdlib>
 #include <vector>

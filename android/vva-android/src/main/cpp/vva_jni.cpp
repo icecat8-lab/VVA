@@ -1,8 +1,3 @@
-// JNI bridge for com.vva.engine.VVAEngine.
-//
-// Every native method takes the engine handle created by nativeCreate(). C++
-// exceptions never cross the JNI boundary: each entry point catches everything
-// and reports failure through the return value and nativeLastError().
 #include <android/bitmap.h>
 #include <android/hardware_buffer.h>
 #include <android/hardware_buffer_jni.h>
@@ -22,7 +17,7 @@ namespace {
 struct Handle {
     vva::Engine engine;
     vva::DeviceType device = vva::DeviceType::AUTO;
-    std::string jniError;  // errors detected by this layer (bad bitmap format, size mismatch, ...)
+    std::string jniError;
 };
 
 inline Handle* toHandle(jlong h) { return reinterpret_cast<Handle*>(h); }
@@ -31,12 +26,11 @@ std::string asciiSafe(const std::string& s) {
     std::string out = s;
     for (char& c : out) {
         const unsigned char u = static_cast<unsigned char>(c);
-        if (u < 0x20 || u >= 0x7F) c = '?';  // NewStringUTF needs valid modified UTF-8
+        if (u < 0x20 || u >= 0x7F) c = '?';
     }
     return out;
 }
 
-// Calls ProgressListener.onProgress(float) -> boolean. A thrown exception cancels the job.
 class ProgressBridge {
 public:
     ProgressBridge(JNIEnv* env, jobject listener) : env_(env), listener_(listener) {
@@ -64,7 +58,6 @@ private:
     jmethodID mid_ = nullptr;
 };
 
-// Installs the progress callback for the duration of one job.
 class ScopedProgress {
 public:
     ScopedProgress(vva::Engine& engine, ProgressBridge& bridge) : engine_(engine) {
@@ -150,7 +143,6 @@ void premultiply(uint8_t* px, size_t count) {
     }
 }
 
-// Shared by the Bitmap and HardwareBuffer entry points. Rows are `inStride` / `outStride` bytes apart.
 bool upscaleRgba(Handle* h, const uint8_t* inPixels, size_t inStride, int w, int ht, uint8_t* outPixels,
                  size_t outStride, bool inPremultiplied, bool outPremultiplied) {
     const int s = h->engine.scale();
@@ -191,7 +183,6 @@ bool upscaleRgba(Handle* h, const uint8_t* inPixels, size_t inStride, int w, int
     return true;
 }
 
-// Classification of an RGBA image; unpremultiplies first when the bitmap carries premultiplied alpha.
 bool classifyRgba(Handle* h, const uint8_t* pixels, size_t strideBytes, int w, int ht, bool premultiplied,
                   vva::Classification& result) {
     const bool convert = premultiplied && hasTranslucency(pixels, w, ht, strideBytes);
@@ -206,7 +197,7 @@ bool classifyRgba(Handle* h, const uint8_t* pixels, size_t strideBytes, int w, i
     return h->engine.classify(src, w, ht, result);
 }
 
-}  // namespace
+}
 
 extern "C" {
 
@@ -235,7 +226,7 @@ JNIEXPORT jboolean JNICALL Java_com_vva_engine_VVAEngine_nativeInit(JNIEnv* env,
             return JNI_FALSE;
         }
         const char* chars = env->GetStringUTFChars(path, nullptr);
-        if (!chars) return JNI_FALSE;  // OutOfMemoryError is pending
+        if (!chars) return JNI_FALSE;
         const std::string p(chars);
         env->ReleaseStringUTFChars(path, chars);
         return h->engine.loadModel(p) ? JNI_TRUE : JNI_FALSE;
@@ -277,7 +268,6 @@ JNIEXPORT jstring JNICALL Java_com_vva_engine_VVAEngine_nativeClassLabel(JNIEnv*
     }
 }
 
-// Returns [index, confidence, probability_0, ..., probability_n-1], or null on failure.
 JNIEXPORT jfloatArray JNICALL Java_com_vva_engine_VVAEngine_nativeClassifyBitmap(JNIEnv* env, jclass, jlong handle,
                                                                                jobject bitmap, jboolean premultiplied) {
     Handle* h = toHandle(handle);
@@ -313,7 +303,7 @@ JNIEXPORT jfloatArray JNICALL Java_com_vva_engine_VVAEngine_nativeClassifyBitmap
         values.push_back(result.confidence);
         values.insert(values.end(), result.probabilities.begin(), result.probabilities.end());
         jfloatArray array = env->NewFloatArray(static_cast<jsize>(values.size()));
-        if (!array) return nullptr;  // OutOfMemoryError is pending
+        if (!array) return nullptr;
         env->SetFloatArrayRegion(array, 0, static_cast<jsize>(values.size()), values.data());
         return array;
     } catch (const std::bad_alloc&) {
@@ -326,7 +316,6 @@ JNIEXPORT jfloatArray JNICALL Java_com_vva_engine_VVAEngine_nativeClassifyBitmap
     return nullptr;
 }
 
-// device: 0 = auto, 1 = CPU, 2 = GPU
 JNIEXPORT void JNICALL Java_com_vva_engine_VVAEngine_nativeSetDevice(JNIEnv*, jclass, jlong handle, jint device) {
     if (Handle* h = toHandle(handle)) {
         h->device = device == 1 ? vva::DeviceType::CPU_NEON : (device == 2 ? vva::DeviceType::GPU_VULKAN : vva::DeviceType::AUTO);
@@ -496,7 +485,6 @@ JNIEXPORT jboolean JNICALL Java_com_vva_engine_VVAEngine_nativeProcessBuffers(JN
         }
         ProgressBridge bridge(env, listener);
         ScopedProgress scoped(h->engine, bridge);
-        // Hardware buffers carry straight (non-premultiplied) RGBA here; strides are in pixels.
         return upscaleRgba(h, lockIn.data(), static_cast<size_t>(din.stride) * 4, static_cast<int>(din.width),
                            static_cast<int>(din.height), lockOut.data(), static_cast<size_t>(dout.stride) * 4, false,
                            false)
@@ -512,4 +500,4 @@ JNIEXPORT jboolean JNICALL Java_com_vva_engine_VVAEngine_nativeProcessBuffers(JN
     return JNI_FALSE;
 }
 
-}  // extern "C"
+}

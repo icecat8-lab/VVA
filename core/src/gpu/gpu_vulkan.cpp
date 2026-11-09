@@ -16,10 +16,10 @@ std::unique_ptr<Backend> createVulkanBackend(const VulkanHandles&, const Model&,
     return nullptr;
 }
 
-}  // namespace gpu
-}  // namespace vva
+}
+}
 
-#else  // VVA_GPU_AVAILABLE
+#else
 
 #include <vulkan/vulkan.h>
 
@@ -34,7 +34,6 @@ std::unique_ptr<Backend> createVulkanBackend(const VulkanHandles&, const Model&,
 #include "gpu_plan.h"
 #include "spirv_data.h"
 
-// Headers written by older generators have no macros: both optional variants were present.
 #ifndef VVA_SPV_CONV4OC
 #define VVA_SPV_CONV4OC 1
 #endif
@@ -97,7 +96,6 @@ public:
             *status = "the driver rejected a shader";
             return false;
         }
-        // The extra convolution variants are optional: a driver that rejects one simply has fewer choices.
         if (VVA_SPV_CONV4OC) createShader(kSpvConv4oc, sizeof(kSpvConv4oc), shaders_[3]);
         if (VVA_SPV_CONV8PX) createShader(kSpvConv8px, sizeof(kSpvConv8px), shaders_[4]);
         VkDescriptorSetLayoutBinding binds[4]{};
@@ -137,7 +135,7 @@ public:
             ci.stage.module = shaders_[k];
             ci.stage.pName = "main";
             ci.layout = layout_;
-            if (shaders_[k] == VK_NULL_HANDLE) continue;  // optional variant not available
+            if (shaders_[k] == VK_NULL_HANDLE) continue;
             if (vkCreateComputePipelines(dev_, VK_NULL_HANDLE, 1, &ci, nullptr, &pipelines_[k]) != VK_SUCCESS) {
                 if (k < 3) {
                     *status = "the driver could not build a compute pipeline";
@@ -172,7 +170,7 @@ public:
     std::string profile(int h, int w) override {
         if (lost_) return "the GPU was lost earlier";
         std::string err;
-        Plan::setWorkTargets(1.0e9, 0.0);  // one submit per command
+        Plan::setWorkTargets(1.0e9, 0.0);
         Compiled* c = compiled(h, w, &err, std::make_pair(-h, -w));
         Plan::setWorkTargets(1.0e9, 4.0e9);
         if (!c) return "cannot prepare the profile: " + err;
@@ -207,8 +205,7 @@ public:
             vkResetFences(dev_, 1, &fence_);
             ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
         }
-        lastH_ = lastW_ = -1;  // the memory now holds profile data
-        // The last segment is empty: it measures the cost of a submit.
+        lastH_ = lastW_ = -1;
         const double overhead = ms.empty() ? 0.0 : ms.back();
         double kindMs[4] = {0, 0, 0, 0};
         int kindCount[4] = {0, 0, 0, 0};
@@ -280,7 +277,7 @@ public:
         const Program& p = c->program;
 
         if (lastH_ != h || lastW_ != w) {
-            std::memset(arena_.mapped, 0, arena_.size);  // borders rely on never-written zeros
+            std::memset(arena_.mapped, 0, arena_.size);
             lastH_ = h;
             lastW_ = w;
         }
@@ -325,7 +322,6 @@ private:
     }
 
     Status deviceFailure(VkResult r, const char* what, std::string* error) {
-        // A timeout or a lost device leaves the GPU in an unknown state: never use it again.
         lost_ = true;
         return fail(error, std::string(what) + " failed (" + std::to_string(static_cast<int>(r)) + ")",
                     Status::DeviceLost);
@@ -408,7 +404,6 @@ private:
         if (setLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev_, setLayout_, nullptr);
     }
 
-    // Builds (once per image size) the program, descriptor sets and command buffers.
     Compiled* compiled(int h, int w, std::string* error, std::pair<int, int> key = std::make_pair(0, 0)) {
         if (key.first == 0 && key.second == 0) key = std::make_pair(h, w);
         auto it = cache_.find(key);
@@ -568,7 +563,7 @@ private:
     bool lost_ = false;
 };
 
-}  // namespace
+}
 
 std::unique_ptr<Backend> createVulkanBackend(const VulkanHandles& vk, const Model& model, std::string* status) {
     std::string reason;
@@ -585,7 +580,7 @@ std::unique_ptr<Backend> createVulkanBackend(const VulkanHandles& vk, const Mode
     return std::unique_ptr<Backend>(backend.release());
 }
 
-}  // namespace gpu
-}  // namespace vva
+}
+}
 
-#endif  // VVA_GPU_AVAILABLE
+#endif

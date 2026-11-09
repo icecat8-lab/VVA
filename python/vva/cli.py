@@ -3,7 +3,6 @@ import sys
 
 from .converter import ConversionError, convert
 
-
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="vva-convert",
@@ -51,7 +50,6 @@ def main(argv=None):
         print("error: %s" % exc, file=sys.stderr)
         return 1
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

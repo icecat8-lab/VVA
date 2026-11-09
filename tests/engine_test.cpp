@@ -1,5 +1,3 @@
-// API-level tests of vva::Engine (tiling, alpha, progress, cancel, errors).
-//   engine_test <rrdbnet.vva> <bad_model.vva>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -53,7 +51,7 @@ int main(int argc, char** argv) {
     }
     const vva::DeviceType dev = vva::DeviceType::AUTO;
 
-    {  // no model loaded
+    {
         vva::Engine e;
         std::vector<uint8_t> in = makeImage(4, 4, 0), out(4 * 4 * 4);
         CHECK(!e.modelLoaded() && e.scale() == 0, "no model: scale is 0");
@@ -75,11 +73,9 @@ int main(int argc, char** argv) {
               "classify() on an upscaler fails with an explanation");
     }
 
-    // Wider than the network's receptive field (~34 px) so that tiling really happens.
     const int W = 120, H = 20, S = 4;
     const size_t outBytes = static_cast<size_t>(W) * S * H * S * 4;
 
-    // Whole image vs tiles with enough overlap -> same picture.
     std::vector<uint8_t> in = makeImage(W, H, 0);
     std::vector<uint8_t> whole(outBytes), tiled(outBytes), onThread(outBytes);
     e.setThreads(1);
@@ -99,7 +95,6 @@ int main(int argc, char** argv) {
     CHECK(e.processImageTile(in.data(), W, H, onThread.data(), dev), "4 threads");
     CHECK(std::memcmp(whole.data(), onThread.data(), outBytes) == 0, "result does not depend on thread count");
 
-    // Progress: one call per tile, increasing, ending at 1.
     {
         e.setTileSize(16);
         e.setTilePad(16);
@@ -116,13 +111,11 @@ int main(int argc, char** argv) {
         for (size_t i = 1; i < seen.size(); ++i) increasing &= seen[i] > seen[i - 1];
         CHECK(increasing && !seen.empty() && seen.back() == 1.0f, "progress increases to 1.0");
 
-        // Cancel through the callback.
         int calls = 0;
         e.setProgressCallback([&](float) { return ++calls < 2; });
         CHECK(!e.processImageTile(in.data(), W, H, out.data(), dev), "callback can cancel");
         CHECK(e.lastError() == "cancelled" && calls == 2, "cancel reported after the second tile");
 
-        // Cancel through Engine::cancel() while running (executor notices at the next operator).
         calls = 0;
         e.setProgressCallback([&](float) {
             if (++calls == 1) e.cancel();
@@ -131,12 +124,10 @@ int main(int argc, char** argv) {
         CHECK(!e.processImageTile(in.data(), W, H, out.data(), dev), "cancel() stops the job");
         CHECK(e.lastError() == "cancelled", "cancel() reported");
 
-        // The engine is usable again afterwards.
         e.setProgressCallback(nullptr);
         CHECK(e.processImageTile(in.data(), W, H, out.data(), dev), "works again after a cancel");
     }
 
-    // Memory budget forces tiling on large inputs (tiny model, 16 MB minimum budget).
     {
         e.setTileSize(0);
         e.setTilePad(16);
@@ -161,7 +152,6 @@ int main(int argc, char** argv) {
         e.setThreads(1);
     }
 
-    // Alpha: constant stays constant, a gradient stays monotonic and in range.
     {
         e.setTileSize(0);
         std::vector<uint8_t> half = makeImage(W, H, 1), out(outBytes);
@@ -181,7 +171,6 @@ int main(int argc, char** argv) {
         CHECK(out[3] == 0 && out[(ow - 1) * 4 + 3] == 255, "alpha ends keep their values");
     }
 
-    // Tiny images and argument checks.
     {
         std::vector<uint8_t> one(4, 200), out(S * S * 4);
         e.setTileSize(0);

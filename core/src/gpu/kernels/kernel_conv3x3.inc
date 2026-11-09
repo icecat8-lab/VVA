@@ -1,6 +1,3 @@
-// 3x3 convolution, stride 1, zero padding 1, computing 4 pixels x 8 output channels per invocation.
-// Activations are planar with a one-pixel zero border (so no bounds checks on the input); weights are
-// packed [output block][input channel][tap][8]. The epilogue is: v = act(acc + bias) * scale (+ residual).
 int x0 = int(gl_GlobalInvocationID.x) * 4;
 int y = int(gl_GlobalInvocationID.y) + P_YBASE;
 int ocb = int(gl_GlobalInvocationID.z);

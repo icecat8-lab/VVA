@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""Engine tests: the production C++ executor/engine against the numpy reference.
-
-Builds the real sources for the host with ASan+UBSan (no Vulkan), converts a
-random RRDBNet, and checks numerics, threading, tiling, odd sizes, every
-operator, hostile model files and the Engine API.
-
-Run from the repository root:  python3 tests/test_engine.py
-"""
 
 import os
 import struct
@@ -16,15 +8,14 @@ import time
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (ENV, ROOT, WORK, Checker, build_binaries, exec_run, make_mobilenetv3_small_state,  # noqa: E402
+from common import (ENV, ROOT, WORK, Checker, build_binaries, exec_run, make_mobilenetv3_small_state,
                     make_rrdbnet_state, run, save_npz, VVAWriter, read_vva)
 
-from vva.converter import convert  # noqa: E402
-from vva.reference import rrdbnet_forward, run_graph  # noqa: E402
+from vva.converter import convert
+from vva.reference import rrdbnet_forward, run_graph
 
 T = Checker("test_engine")
 EXE = build_binaries(sanitize=True)
-
 
 def to_model(sd, name, **kw):
     npz = save_npz(sd, name)
@@ -32,10 +23,8 @@ def to_model(sd, name, **kw):
     convert(npz, out, name="test-model", log=lambda *_: None, **kw)
     return out
 
-
 def rel_err(a, b):
     return float(np.max(np.abs(a - b))) / max(float(np.max(np.abs(b))), 1e-12)
-
 
 def check_rrdbnet(nf, gc, nb, h, w, seed):
     sd = make_rrdbnet_state(nf, gc, nb, seed=seed)
@@ -57,16 +46,13 @@ def check_rrdbnet(nf, gc, nb, h, w, seed):
         T.check(gotn is not None and np.array_equal(got1, gotn), "%d threads give bit-identical output" % threads)
     return model
 
-
 def write_graph(path, builder):
     w = builder()
     w.save(path)
     return path
 
-
 def rnd(rng, *shape, scale=0.5):
     return (rng.randn(*shape) * scale).astype(np.float32)
-
 
 def custom_graph_cases():
     rng = np.random.RandomState(11)
@@ -80,14 +66,14 @@ def custom_graph_cases():
         w.add_node("ReLU", ["a"], ["a_r"])
         w.add_node("ResizeNearest", ["a_r"], ["up"], {"scale": [2, 2]})
         w.add_tensor("w2", rnd(rng, 6, 4, 1, 1), "f16")
-        w.add_node("Conv2D", ["up", "w2"], ["c2"], {})                       # 1x1, no bias, no padding
+        w.add_node("Conv2D", ["up", "w2"], ["c2"], {})
         w.add_tensor("w3", rnd(rng, 6, 3, 5, 5, scale=0.1), "f16"); w.add_tensor("b3", rnd(rng, 6), "f32")
-        w.add_node("Conv2D", ["input", "w3", "b3"], ["c3"], {"padding": [2, 2]})  # 5x5
+        w.add_node("Conv2D", ["input", "w3", "b3"], ["c3"], {"padding": [2, 2]})
         w.add_node("Add", ["c2", "c3"], ["s"])
-        w.add_tensor("w4", rnd(rng, 6, 3, 3, 3, scale=0.2), "f32")             # groups=2, dilation 2
+        w.add_tensor("w4", rnd(rng, 6, 3, 3, 3, scale=0.2), "f32")
         w.add_node("Conv2D", ["s", "w4"], ["c4"], {"padding": [2, 2], "dilation": [2, 2], "groups": 2})
         w.add_tensor("w5", rnd(rng, 6, 1, 3, 3, scale=0.3), "f16"); w.add_tensor("b5", rnd(rng, 6), "f32")
-        w.add_node("Conv2D", ["c4", "w5", "b5"], ["c5"], {"padding": [1, 1], "groups": 6})  # depthwise
+        w.add_node("Conv2D", ["c4", "w5", "b5"], ["c5"], {"padding": [1, 1], "groups": 6})
         w.add_tensor("w6", rnd(rng, 3, 6, 3, 3, scale=0.2), "f16")
         w.add_node("Conv2D", ["c5", "w6"], ["output"], {"padding": [1, 1]})
         w.add_output("output", [1, 3, -1, -1])
@@ -100,8 +86,8 @@ def custom_graph_cases():
         w.add_tensor("w1", rnd(rng, 4, 3, 3, 3), "f16"); w.add_tensor("b1", rnd(rng, 4), "f32")
         w.add_node("Conv2D", ["input", "w1", "b1"], ["a"], {"padding": [1, 1]})
         w.add_node("Sigmoid", ["a"], ["sg"])
-        w.add_node("Mul", ["a", "sg"], ["silu"])                    # tensor * tensor
-        w.add_node("Add", ["silu", "silu"], ["twice"])              # same operand twice (in-place edge case)
+        w.add_node("Mul", ["a", "sg"], ["silu"])
+        w.add_node("Add", ["silu", "silu"], ["twice"])
         w.add_node("Mul", ["twice"], ["scaled"], {"scalar": 0.37})
         w.add_node("Clip", ["scaled"], ["clipped"], {"min": -0.2, "max": 0.4})
         w.add_node("Clip", ["a"], ["lowclip"], {"min": 0.1})
@@ -126,7 +112,7 @@ def custom_graph_cases():
         cases[name] = (g_shuffle, 3, 6, 5)
 
     def g_aniso():
-        # Different factors per axis: nearest resize [2,3] undone by a conv with stride [2,3].
+
         w = VVAWriter(name="aniso", scale=1)
         w.add_input("input", [1, 2, -1, -1])
         w.add_node("ResizeNearest", ["input"], ["up"], {"scale": [2, 3]})
@@ -136,7 +122,6 @@ def custom_graph_cases():
         return w
     cases["aniso"] = (g_aniso, 2, 5, 4)
     return cases
-
 
 def half_exactness():
     bits = np.array([0x0001, 0x0002, 0x03FF, 0x0400, 0x0401, 0x3C00, 0x7BFF, 0x8001, 0x83FF, 0x8400, 0xBC00,
@@ -155,9 +140,7 @@ def half_exactness():
         got = got.reshape(len(vals), -1)
         T.check(all(np.all(got[i] == vals[i]) for i in range(len(vals))), "all fp16 values (subnormals included) convert exactly")
 
-
 def hostile_models():
-    """Valid containers with nonsense graphs: must be rejected cleanly, never crash."""
     rng = np.random.RandomState(5)
 
     def base(op, inputs, attrs, tensors, in_shape=(1, 3, -1, -1), out_shape=(1, 3, -1, -1)):
@@ -204,7 +187,7 @@ def hostile_models():
             expect = "declares scale"
         writer.save(path, validate=False)
         text, got = exec_run(EXE["exec_run"], path, np.ones((3, 8, 8), np.float32), 1)
-        if label == "non-integer scale":  # identity-like graph is valid, scale 1
+        if label == "non-integer scale":
             T.check(got is not None, "valid identity-like graph runs")
             continue
         T.check(got is None and ("PREPARE_ERROR" in text or "LOAD_ERROR" in text), "%s -> rejected cleanly (%s)" % (label, text[:80]))
@@ -212,7 +195,6 @@ def hostile_models():
             T.check(expect in text, "%s: message mentions '%s' (%s)" % (label, expect, text[:100]))
         T.check("Sanitizer" not in text and "runtime error" not in text, "%s: no sanitizer report" % label)
 
-    # Mutated real model files must never crash the executor.
     sd = make_rrdbnet_state(4, 3, 1, seed=2)
     model = to_model(sd, "fuzz_base")
     raw = bytearray(open(model, "rb").read())
@@ -229,15 +211,11 @@ def hostile_models():
             crashes += 1
     T.check(crashes == 0, "40 corrupted model files: no crashes (%d)" % crashes)
 
-
-
 def softmax(v):
     e = np.exp(v - np.max(v))
     return e / e.sum()
 
-
 def classifier_tests():
-    """MobileNetV3-Small classifier: executor, resize (against PIL), CLI, error paths."""
     try:
         from PIL import Image
     except ImportError:
@@ -343,7 +321,6 @@ def classifier_tests():
     rb = with_meta(mean=[0.1, 0.2])
     T.check(rb.returncode == 1 and "mean" in rb.stderr, "mean needs three numbers: " + rb.stderr.strip()[:100])
 
-
 def cli_tests(model, sd_deq):
     cli = EXE["vva-cli"]
     r = run([cli, "info", model], env=ENV)
@@ -391,7 +368,6 @@ def cli_tests(model, sd_deq):
     T.check(r.returncode == 1 and "truncated" in r.stderr, "truncated PPM is reported")
     r = run([cli, "run", model, ppm, out, "--bogus"], env=ENV)
     T.check(r.returncode == 1 and "unknown option" in r.stderr, "unknown option is reported")
-
 
 def main():
     print("== RRDBNet vs numpy (odd sizes exercise every kernel remainder) ==")
@@ -471,7 +447,7 @@ def main():
     dt = time.time() - t0
     macs = 0
     meta, stored = read_vva(model)
-    # conv MACs per run: output pixels * out_c * in_c * k*k
+
     shapes = {"input": (3, 96, 96)}
     for n in meta["nodes"]:
         a = n.get("attrs", {})
@@ -492,7 +468,6 @@ def main():
     print("  %.2f GMAC in %.2f s on 1 thread = %.1f GFLOP/s" % (macs / 1e9, dt, 2 * macs / 1e9 / dt))
 
     return T.finish()
-
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -28,7 +28,7 @@ float halfToFloat(uint16_t h) {
     if (exp == 0) {
         if (man == 0) {
             bits = sign;
-        } else {  // subnormal half: normalise into a float
+        } else {
             int e = -1;
             do {
                 ++e;
@@ -53,31 +53,29 @@ enum class Op { Conv, Add, Mul, MulScalar, LeakyReLU, ReLU, Sigmoid, Clip, Hards
 
 struct Step {
     Op op = Op::Add;
-    std::string label;  // "node #3 (Conv2D)" for messages
+    std::string label;
     std::vector<int> in;
     int out = -1;
 
-    // Conv2D
     int outC = 0, inC = 0, kh = 0, kw = 0, sh = 1, sw = 1, ph = 0, pw = 0, dh = 1, dw = 1, groups = 1;
     bool fast = false;
-    std::vector<float> weights;  // fast: packed per output group, generic: OIHW
+    std::vector<float> weights;
     std::vector<float> bias;
     std::vector<int> groupStart, groupSize;
     std::vector<size_t> groupOffset;
 
-    // Other operators
-    float f0 = 0.f, f1 = 0.f;  // alpha / scalar / clip min,max
-    int i0 = 1, i1 = 1;        // resize scale or pixel-shuffle factor
+    float f0 = 0.f, f1 = 0.f;
+    int i0 = 1, i1 = 1;
 
-    bool inplace = false;  // output reuses the buffer of input `inplaceArg`
+    bool inplace = false;
     int inplaceArg = 0;
-    std::vector<int> release;  // values that can be freed after this step
+    std::vector<int> release;
 };
 
 struct Buf {
     std::unique_ptr<float[]> own;
-    float* mut = nullptr;          // writable view (null for the borrowed input)
-    const float* data = nullptr;   // readable view
+    float* mut = nullptr;
+    const float* data = nullptr;
     Shape shape;
 };
 
@@ -85,10 +83,6 @@ bool failMsg(std::string* error, const std::string& message) {
     if (error) *error = message;
     return false;
 }
-
-// ---------------------------------------------------------------------------
-// Threading
-// ---------------------------------------------------------------------------
 
 template <class F>
 void parallelFor(int threads, int n, F&& f) {
@@ -112,23 +106,15 @@ void parallelFor(int threads, int n, F&& f) {
         try {
             pool.emplace_back(worker);
         } catch (...) {
-            break;  // could not start a thread: the remaining workers still finish all items
+            break;
         }
     }
     worker();
     for (std::thread& t : pool) t.join();
 }
 
-// ---------------------------------------------------------------------------
-// Convolution
-// ---------------------------------------------------------------------------
+constexpr int kMaxGroupOut = 4;
 
-constexpr int kMaxGroupOut = 4;  // output channels computed together
-
-// Computes NO output channels x NX consecutive output pixels.
-//   p0       : padded input, positioned at (channel 0, row y, column x0)
-//   wp       : weights packed as [ic][ky][kx][NO]
-//   dst      : output positioned at (first channel, y, x0); channel stride oStride
 template <int NO, int NX>
 inline void convBlock(const float* VVA_RESTRICT p0, size_t planeStride, size_t rowStride, int inC, int kh, int kw,
                       const float* VVA_RESTRICT wp, const float* VVA_RESTRICT bias, float* VVA_RESTRICT dst,
@@ -280,10 +266,6 @@ void runConvGeneric(const Step& st, const Buf& in, Buf& out, int threads) {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Element-wise and layout operators
-// ---------------------------------------------------------------------------
-
 constexpr size_t kChunk = 1u << 15;
 
 template <class F>
@@ -315,7 +297,7 @@ void runUnary(const Step& st, const float* a, float* d, size_t n, int threads) {
                 for (size_t i = b; i < e; ++i) d[i] = 1.f / (1.f + std::exp(-a[i]));
             });
             break;
-        case Op::Hardsigmoid:  // relu6(x + 3) / 6
+        case Op::Hardsigmoid:
             forEachChunk(threads, n, [&](size_t b, size_t e) {
                 for (size_t i = b; i < e; ++i) {
                     const float t = a[i] + 3.f;
@@ -323,7 +305,7 @@ void runUnary(const Step& st, const float* a, float* d, size_t n, int threads) {
                 }
             });
             break;
-        case Op::Hardswish:  // x * relu6(x + 3) / 6
+        case Op::Hardswish:
             forEachChunk(threads, n, [&](size_t b, size_t e) {
                 for (size_t i = b; i < e; ++i) {
                     const float t = a[i] + 3.f;
@@ -367,7 +349,6 @@ void runBinary(Op op, const float* a, const float* b, float* d, size_t n, int th
     }
 }
 
-// d[c][i] = full[c][i] * scale[c]   (squeeze-and-excitation style channel scaling)
 void runMulChannel(const float* full, const float* scale, float* d, int channels, size_t plane, int threads) {
     parallelFor(threads, channels, [&](int c) {
         const float k = scale[c];
@@ -416,10 +397,6 @@ void runPixelShuffle(const Step& st, const Buf& in, Buf& out, int threads) {
         }
     });
 }
-
-// ---------------------------------------------------------------------------
-// Attribute parsing
-// ---------------------------------------------------------------------------
 
 bool attrInt(const json::Value& attrs, const char* key, int def, int minV, int maxV, int& out, std::string* err,
              const std::string& where) {
@@ -486,20 +463,16 @@ bool loadConstant(const Model& model, const TensorInfo& t, std::vector<float>& o
     return true;
 }
 
-}  // namespace
-
-// ---------------------------------------------------------------------------
-// Executor::Impl
-// ---------------------------------------------------------------------------
+}
 
 struct Executor::Impl {
     std::vector<Step> steps;
-    int numValues = 1;  // value 0 is the graph input
+    int numValues = 1;
     int outputId = 0;
     int inC = 0, outC = 0, scale = 1;
     int fixedH = 0, fixedW = 0;
-    std::vector<int> lastUse;  // per value: last step index that reads it (steps.size() for the output)
-    std::vector<int> defStep;  // per value: step that writes it (-1 for the input)
+    std::vector<int> lastUse;
+    std::vector<int> defStep;
 
     bool inferShapes(const Shape& in, std::vector<Shape>& s, std::string* err) const {
         if (in.c < 1 || in.h < 1 || in.w < 1 || in.h > (1 << 20) || in.w > (1 << 20)) {
@@ -520,7 +493,7 @@ struct Executor::Impl {
                     const int64_t ww = static_cast<int64_t>(a.w) + 2LL * st.pw - static_cast<int64_t>(st.dw) * (st.kw - 1) - 1;
                     if (hh < 0 || ww < 0) return failMsg(err, st.label + ": input is smaller than the kernel");
                     o.c = st.outC;
-                    o.h = static_cast<int>(hh / st.sh + 1);  // inputs are <= 2^20, so this fits
+                    o.h = static_cast<int>(hh / st.sh + 1);
                     o.w = static_cast<int>(ww / st.sw + 1);
                     break;
                 }
@@ -531,9 +504,9 @@ struct Executor::Impl {
                     if (same) {
                         o = a;
                     } else if (st.op == Op::Mul && b.c == a.c && b.h == 1 && b.w == 1) {
-                        o = a;  // channel scale in the second operand
+                        o = a;
                     } else if (st.op == Op::Mul && a.c == b.c && a.h == 1 && a.w == 1) {
-                        o = b;  // channel scale in the first operand
+                        o = b;
                     } else {
                         return failMsg(err, st.label + ": operands have different shapes");
                     }
@@ -862,7 +835,6 @@ std::unique_ptr<Executor> Executor::create(const Model& model, std::string* erro
     }
     im.outputId = outIt->second;
 
-    // Liveness: when can each value be released, and which steps can work in place.
     const int numSteps = static_cast<int>(im.steps.size());
     im.lastUse.assign(static_cast<size_t>(im.numValues), -1);
     im.defStep.assign(static_cast<size_t>(im.numValues), -1);
@@ -893,14 +865,13 @@ std::unique_ptr<Executor> Executor::create(const Model& model, std::string* erro
         for (size_t k = 0; k < st.in.size(); ++k) {
             const int v = st.in[k];
             if (v == 0 || v == im.outputId || im.lastUse[v] != i || !seen.insert(v).second) continue;
-            if (st.inplace && static_cast<int>(k) == st.inplaceArg) continue;  // ownership moves to the output
+            if (st.inplace && static_cast<int>(k) == st.inplaceArg) continue;
             st.release.push_back(v);
         }
         if (st.out != im.outputId && im.lastUse[st.out] == i) st.release.push_back(st.out);
     }
 
     if (allowAnyOutput) {
-        // Non-image models: validate at the fixed size (or 224 x 224 when the input is dynamic).
         Shape a;
         a.c = im.inC;
         a.h = im.fixedH > 0 ? im.fixedH : 224;
@@ -916,8 +887,6 @@ std::unique_ptr<Executor> Executor::create(const Model& model, std::string* erro
         return exec;
     }
 
-    // Shape checks on two different sizes: channels must line up and the output
-    // must be an exact integer multiple of the input (needed for tiling).
     std::vector<Shape> s1, s2;
     Shape a;
     a.c = im.inC;
@@ -1024,7 +993,6 @@ Executor::Status Executor::run(const float* in, int h, int w, float* out, int th
 
             const int movedId = st.inplace ? st.in[st.inplaceArg] : -1;
             auto inData = [&](int k) -> const float* {
-                // After an in-place move the source buffer now lives in `dst`.
                 if (st.in[k] == movedId) return dst.data;
                 return vals[st.in[k]].data;
             };
@@ -1098,4 +1066,4 @@ Executor::Status Executor::run(const float* in, int h, int w, float* out, int th
     }
 }
 
-}  // namespace vva
+}

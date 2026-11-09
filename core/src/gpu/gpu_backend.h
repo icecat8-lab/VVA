@@ -1,4 +1,3 @@
-// Interface between the engine and the Vulkan runtime (kept free of Vulkan headers).
 #ifndef VVA_GPU_BACKEND_H
 #define VVA_GPU_BACKEND_H
 
@@ -25,19 +24,12 @@ public:
     enum class Status { Ok, Cancelled, DeviceLost, Error };
     virtual ~Backend() {}
 
-    // Whether an h x w image can run within this GPU's limits (also warms up the program cache).
     virtual bool fits(int h, int w) = 0;
-    // Activation memory needed for an h x w image, in bytes (0 when the size cannot run).
     virtual size_t estimateBytes(int h, int w) = 0;
-    // in: planar float [inChannels][h][w]; out: planar float [outChannels][h*scale][w*scale].
     virtual Status run(const float* in, int h, int w, float* out, const std::atomic<bool>* cancel, std::string* error) = 0;
-    // One line about the device and its limits (for status messages).
     virtual std::string describe() const = 0;
-    // Stable text identifying the GPU and its driver (used to remember test results per device).
     virtual std::string identity() const = 0;
-    // Runs an h x w image with one submit per command and reports where the time goes. Diagnostic only.
     virtual std::string profile(int h, int w) = 0;
-    // Convolution kernel variants (see convVariantName()); the engine picks the fastest correct one at start-up.
     virtual int variantCount() const = 0;
     virtual void setVariant(int variant) = 0;
     virtual int variantIndex() const = 0;
@@ -45,11 +37,9 @@ public:
     virtual int outChannels() const = 0;
 };
 
-// Returns nullptr and fills `status` when the model or the device cannot use the GPU path, or when the library
-// was built without GPU kernels.
 std::unique_ptr<Backend> createVulkanBackend(const VulkanHandles& vk, const Model& model, std::string* status);
 
-}  // namespace gpu
-}  // namespace vva
+}
+}
 
 #endif

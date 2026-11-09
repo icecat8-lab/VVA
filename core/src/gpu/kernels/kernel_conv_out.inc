@@ -1,4 +1,3 @@
-// Epilogue helpers of the convolution kernel (global scope, after the push constants are declared).
 void vva_put(int idx, float v) {
     float t = vva_act(v, P_ALPHA) * P_SCALE;
     if (P_HASRES != 0) {

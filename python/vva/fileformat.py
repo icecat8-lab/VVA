@@ -1,9 +1,3 @@
-"""Reader and writer for the .vva (version 2) model container.
-
-The format is described in docs/FORMAT.md. This module only needs numpy,
-so it can be used on any machine (PC, Colab, Termux) without PyTorch.
-"""
-
 import json
 import struct
 import zlib
@@ -19,21 +13,16 @@ _HEADER = struct.Struct("<4sIIIQQQQQII")
 _DTYPES = {"f32": np.dtype("<f4"), "f16": np.dtype("<f2")}
 _NAMES = {v: k for k, v in _DTYPES.items()}
 
-
 class VVAFormatError(ValueError):
-    """Raised when a .vva file or a model description is invalid."""
-
+    pass
 
 def _align_up(value, alignment=ALIGN):
     return (value + alignment - 1) // alignment * alignment
 
-
 def crc32(data):
     return zlib.crc32(data) & 0xFFFFFFFF
 
-
 def pack(meta, data):
-    """Serialize a metadata dict and a data blob into a .vva file image."""
     meta_bytes = json.dumps(meta, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
     meta_offset = HEADER_SIZE
     data_offset = _align_up(meta_offset + len(meta_bytes))
@@ -47,9 +36,7 @@ def pack(meta, data):
     )
     return header + meta_bytes + padding + bytes(data)
 
-
 def _validate_graph(meta):
-    """Same structural rules as the C++ reader (single assignment, topological order)."""
     inputs = meta.get("inputs") or []
     outputs = meta.get("outputs") or []
     if not inputs or not outputs:
@@ -77,9 +64,7 @@ def _validate_graph(meta):
         if io["name"] not in available:
             raise VVAFormatError("graph output '%s' is not produced by any node" % io["name"])
 
-
 class VVAWriter:
-    """Builds a .vva v2 model: graph inputs/outputs, constant tensors and nodes."""
 
     def __init__(self, name="", scale=1, author="", license="", description=""):
         self.meta_info = {"scale": int(scale)}
@@ -103,7 +88,6 @@ class VVAWriter:
         return name
 
     def add_tensor(self, name, array, dtype="f16"):
-        """Store a constant tensor. Values are converted to little-endian `dtype`."""
         if dtype not in _DTYPES:
             raise VVAFormatError("unsupported dtype '%s' (use 'f32' or 'f16')" % dtype)
         if name in self._names:
@@ -154,9 +138,7 @@ class VVAWriter:
             f.write(data)
         return len(data)
 
-
 def read_vva(source):
-    """Read a .vva v2 file (path or bytes). Returns (meta_dict, {tensor_name: ndarray})."""
     if isinstance(source, (bytes, bytearray, memoryview)):
         raw = bytes(source)
     else:

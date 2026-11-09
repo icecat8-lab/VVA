@@ -1,5 +1,3 @@
-// Host-side test program: loads a .vva file with the production reader and
-// prints a machine-readable summary that tests/test_format.py checks.
 #include <cstdio>
 #include <string>
 

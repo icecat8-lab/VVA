@@ -14,9 +14,6 @@ layout(push_constant) uniform Params {
     int width;
 } p;
 
-// fp16 storage and fp16 arithmetic.
-// Input planes are padded by one zero pixel on every side, so no bounds checks are needed.
-// Each invocation computes 4 neighbouring pixels x 8 output channels.
 void main() {
     int x0 = int(gl_GlobalInvocationID.x) * 4;
     int y = int(gl_GlobalInvocationID.y);

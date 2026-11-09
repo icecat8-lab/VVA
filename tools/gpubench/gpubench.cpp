@@ -1,10 +1,3 @@
-// vva-gpubench: compares several 3x3 convolution kernels on the GPU (Vulkan compute) and checks
-// each one against a CPU reference before reporting its speed.
-//
-//   vva-gpubench <directory containing the .spv files>
-//
-// Kernels: baseline fp32, register-tiled fp32 (padded input, 4 pixels x 8 channels per thread) and
-// the same tiled kernel in fp16 (only when the device supports it).
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -39,10 +32,10 @@ struct Config {
 struct Variant {
     const char* label;
     const char* file;
-    bool padded;  // input planes carry a one-pixel zero border
-    bool half;    // fp16 storage and arithmetic
-    int px;       // output pixels per invocation along x
-    int wgx, wgy; // local workgroup size
+    bool padded;
+    bool half;
+    int px;
+    int wgx, wgy;
 };
 
 struct Result {
@@ -256,8 +249,6 @@ void destroyPipeline(const Dev& c, Pipeline& p) {
     p = Pipeline();
 }
 
-// A second logical device with fp16 arithmetic and 16-bit storage enabled. Returns false when the
-// driver does not offer them (creation fails cleanly in that case).
 bool createFp16Device(const vva::VulkanContext& base, Dev& out) {
     static const char* const kExtensions[] = {"VK_KHR_shader_float16_int8", "VK_KHR_16bit_storage"};
     for (int attempt = 0; attempt < 2; ++attempt) {
@@ -281,7 +272,7 @@ bool createFp16Device(const vva::VulkanContext& base, Dev& out) {
         di.pNext = &fp16;
         di.queueCreateInfoCount = 1;
         di.pQueueCreateInfos = &qi;
-        di.enabledExtensionCount = attempt == 0 ? 2u : 1u;  // second try: without the 16-bit storage extension name
+        di.enabledExtensionCount = attempt == 0 ? 2u : 1u;
         di.ppEnabledExtensionNames = kExtensions;
 
         VkDevice device = VK_NULL_HANDLE;
@@ -296,7 +287,6 @@ bool createFp16Device(const vva::VulkanContext& base, Dev& out) {
     return false;
 }
 
-// Runs one kernel on one problem size and fills `res`.
 Status runConfig(const Dev& c, Pipeline& p, const Variant& v, const Config& cfg, Result& res) {
     res = Result();
     if (cfg.w % v.px != 0 || cfg.cout % 8 != 0) return kVulkanError;
@@ -420,14 +410,14 @@ Status runConfig(const Dev& c, Pipeline& p, const Variant& v, const Config& cfg,
         si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         si.commandBufferCount = 1;
         si.pCommandBuffers = &cmd;
-        for (int s = 0; s < kSubmits + 1 && ok; ++s) {  // the first submit is a warm-up
+        for (int s = 0; s < kSubmits + 1 && ok; ++s) {
             const auto t0 = std::chrono::steady_clock::now();
             ok = check(vkQueueSubmit(c.computeQueue, 1, &si, p.fence), "vkQueueSubmit");
             if (!ok) break;
             const VkResult wr = vkWaitForFences(c.device, 1, &p.fence, VK_TRUE, 20ull * 1000ull * 1000ull * 1000ull);
             if (wr == VK_TIMEOUT) {
                 std::printf("  the GPU did not finish within 20 s - stopping\n");
-                return kFatal;  // resources are left alone on purpose: the GPU may still be using them
+                return kFatal;
             }
             ok = check(wr, "vkWaitForFences");
             const auto t1 = std::chrono::steady_clock::now();
@@ -460,7 +450,7 @@ Status runConfig(const Dev& c, Pipeline& p, const Variant& v, const Config& cfg,
             }
             const double got = fetch(static_cast<size_t>(oc) * plane + static_cast<size_t>(y) * cfg.w + x);
             const double e = std::fabs(got - ref) / std::fmax(1.0, std::fabs(ref));
-            if (!(e == e)) worst = HUGE_VAL;  // NaN counts as a failure and stays one
+            if (!(e == e)) worst = HUGE_VAL;
             else if (e > worst) worst = e;
         }
         res.err = worst;
@@ -479,7 +469,7 @@ Status runConfig(const Dev& c, Pipeline& p, const Variant& v, const Config& cfg,
     return status;
 }
 
-}  // namespace
+}
 
 int main(int argc, char** argv) {
     if (argc != 2) {
@@ -507,7 +497,7 @@ int main(int argc, char** argv) {
     Dev dev16;
     bool tried16 = false, have16 = false;
 
-    const Config smoke = {64, 32, 32, 32};  // quick correctness gate before the heavy sizes
+    const Config smoke = {64, 32, 32, 32};
     const Config configs[] = {{64, 32, 128, 128}, {64, 64, 128, 128}, {64, 64, 256, 256}};
     const size_t kVariantCount = sizeof(kVariants) / sizeof(kVariants[0]);
     std::vector<Result> finalResult(kVariantCount);
@@ -579,7 +569,7 @@ int main(int argc, char** argv) {
         }
     }
     if (best > 0.0) {
-        const double modelFlops = 2.0 * 5706432.0 * 24576.0;  // maru-x4 on a 128x192 image
+        const double modelFlops = 2.0 * 5706432.0 * 24576.0;
         std::printf("\nBest: %s. Rough estimate for maru-x4 on a 128x192 image: %.1f s (CPU, 8 threads: 15.0 s)\n", bestName,
                     modelFlops / (best * 1e9));
     } else {

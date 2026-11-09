@@ -79,8 +79,9 @@ jobs:
 
       - name: Check that the binaries contain the GPU path
         run: |
-          CLI="$(find . -name vva-cli -type f -not -path './dist/*' | head -1)"
-          test -n "$CLI" || { echo "::error::vva-cli was not found"; exit 1; }
+          CLI="build-native/vva-cli"
+          test -f "$CLI" || { echo "::error::$CLI was not found"; exit 1; }
+          test -f core/src/gpu/spirv_data.h || { echo "::error::spirv_data.h was not generated"; exit 1; }
           if strings "$CLI" | grep -q "this build has no GPU kernels"; then
             echo "::error::this build has no GPU kernels; refusing to publish a CPU-only release"
             exit 1

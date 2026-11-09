@@ -1,17 +1,3 @@
-"""PyTorch (.pth) / NumPy (.npz) checkpoint -> .vva (version 2).
-
-Supported networks
-* the x4 ``RRDBNet`` of basicsr / Real-ESRGAN (and models trained with that code): keys such as
-  ``conv_first``, ``body.N.rdb{1,2,3}.conv{1..5}``, ``conv_body``, ``conv_up1``, ``conv_up2``,
-  ``conv_hr`` and ``conv_last``;
-* the torchvision ``MobileNetV3-Small`` image classifier (any number of classes): keys such as
-  ``features.N.block.M...`` and ``classifier.0`` / ``classifier.3``. BatchNorm is folded into the
-  convolutions.
-
-The converter writes the complete graph (not just weights), so the engine can run the file without any
-further information.
-"""
-
 import os
 
 import numpy as np
@@ -22,22 +8,15 @@ from .reference import MBV3_SMALL, mobilenetv3_small_forward, rrdbnet_forward, r
 _FP16_MAX = 65000.0
 _WRAPPER_KEYS = ("params_ema", "params", "state_dict", "model", "net_g", "g_ema")
 
-
 class ConversionError(Exception):
-    """The checkpoint cannot be converted (message is meant for the user)."""
-
-
-# ---------------------------------------------------------------------------
-# Loading
-# ---------------------------------------------------------------------------
+    pass
 
 def _to_numpy(value):
-    if hasattr(value, "detach"):  # torch.Tensor
+    if hasattr(value, "detach"):
         return value.detach().cpu().float().numpy()
     if isinstance(value, np.ndarray):
         return value.astype(np.float32, copy=False)
     return None
-
 
 def _unwrap(ckpt):
     if not isinstance(ckpt, dict):
@@ -60,9 +39,7 @@ def _unwrap(ckpt):
         raise ConversionError("no weight tensors found in the checkpoint")
     return state
 
-
 def load_checkpoint(path, allow_pickle=False):
-    """Return {name: float32 ndarray} from a .pth/.pt (needs torch) or .npz file."""
     if not os.path.exists(path):
         raise ConversionError("input file not found: %s" % path)
     if os.path.splitext(path)[1].lower() == ".npz":
@@ -76,17 +53,12 @@ def load_checkpoint(path, allow_pickle=False):
     try:
         try:
             ckpt = torch.load(path, map_location="cpu", weights_only=not allow_pickle)
-        except TypeError:  # torch < 1.13 has no weights_only
+        except TypeError:
             ckpt = torch.load(path, map_location="cpu")
     except Exception as exc:
         raise ConversionError(
             "could not read the checkpoint safely (%s). If you trust this file, retry with --allow-pickle." % exc)
     return _unwrap(ckpt)
-
-
-# ---------------------------------------------------------------------------
-# Graph construction
-# ---------------------------------------------------------------------------
 
 def _need(sd, key, shape_check=None):
     if key not in sd:
@@ -96,13 +68,10 @@ def _need(sd, key, shape_check=None):
         raise ConversionError("weight '%s' has unexpected shape %s" % (key, tuple(arr.shape)))
     return arr
 
-
 def _conv_shape(out_c, in_c):
     return lambda s: len(s) == 4 and s[0] == out_c and s[1] == in_c and s[2] == s[3] and s[2] % 2 == 1
 
-
 def inspect_rrdbnet(sd):
-    """Validate the layout and return (nf, gc, nb)."""
     first = _need(sd, "conv_first.weight", lambda s: len(s) == 4 and s[2] == s[3] and s[2] % 2 == 1)
     nf, in_ch = first.shape[0], first.shape[1]
     if in_ch != 3:
@@ -128,9 +97,7 @@ def inspect_rrdbnet(sd):
     _need(sd, "conv_first.bias", lambda s: s == (nf,))
     return nf, gc, nb
 
-
 def build_rrdbnet(sd, name="model", fp16=True, lrelu_slope=0.2, res_scale=0.2, author="", license=""):
-    """Return a VVAWriter holding the complete RRDBNet graph and its weights."""
     nf, gc, nb = inspect_rrdbnet(sd)
     writer = VVAWriter(name=name, scale=4, author=author, license=license,
                        description="RRDBNet x4 (nf=%d, gc=%d, nb=%d)" % (nf, gc, nb))
@@ -208,19 +175,7 @@ def build_rrdbnet(sd, name="model", fp16=True, lrelu_slope=0.2, res_scale=0.2, a
     writer.unused_keys = unused
     return writer
 
-
-# ---------------------------------------------------------------------------
-# Verification
-# ---------------------------------------------------------------------------
-
 def verify_file(path, sd, lrelu_slope=0.2, res_scale=0.2, size=(10, 13), seed=0):
-    """Re-read the written file and check it against the original network.
-
-    Returns (graph_error, quantisation_error), both relative to the output range:
-    the first compares the stored graph with the same (dequantised) weights run
-    through the plain network and must be ~1e-12; the second is the effect of fp16
-    weight storage relative to the original weights.
-    """
     meta, stored = read_vva(path)
     x = np.random.RandomState(seed).rand(3, size[0], size[1])
     got = run_graph(meta, stored, x)
@@ -232,25 +187,17 @@ def verify_file(path, sd, lrelu_slope=0.2, res_scale=0.2, size=(10, 13), seed=0)
     return (float(np.max(np.abs(got - want_same_weights))) / span,
             float(np.max(np.abs(got - want_original))) / span)
 
-
-# ---------------------------------------------------------------------------
-# MobileNetV3-Small classifier
-# ---------------------------------------------------------------------------
-
 def _make_divisible(v, divisor=8):
     new_v = max(divisor, int(v + divisor / 2) // divisor * divisor)
     if new_v < 0.9 * v:
         new_v += divisor
     return new_v
 
-
 def _need_bn(sd, prefix, channels):
     for suffix in (".weight", ".bias", ".running_mean", ".running_var"):
         _need(sd, prefix + suffix, lambda s, c=channels: s == (c,))
 
-
 def inspect_mobilenetv3_small(sd):
-    """Validate the layout against torchvision's MobileNetV3-Small; returns the number of classes."""
     _need(sd, "features.0.0.weight", lambda s: s == (16, 3, 3, 3))
     _need_bn(sd, "features.0.1", 16)
     for i, (cin, k, exp, cout, se, _act, _stride) in enumerate(MBV3_SMALL, start=1):
@@ -280,10 +227,8 @@ def inspect_mobilenetv3_small(sd):
     _need(sd, "classifier.3.bias", lambda s, n=last.shape[0]: s == (n,))
     return int(last.shape[0])
 
-
 def build_mobilenetv3_small(sd, name="classifier", classes=None, input_size=224, mean=(0.485, 0.456, 0.406),
                             std=(0.229, 0.224, 0.225), fp16=True, bn_eps=1e-3, author="", license=""):
-    """Return a VVAWriter holding the MobileNetV3-Small classifier graph (BatchNorm folded in)."""
     n_classes = inspect_mobilenetv3_small(sd)
     if classes is not None and len(classes) != n_classes:
         raise ConversionError("the checkpoint has %d classes but %d class names were given" % (n_classes, len(classes)))
@@ -373,10 +318,7 @@ def build_mobilenetv3_small(sd, name="classifier", classes=None, input_size=224,
     writer.add_output("output", [1, n_classes, -1, -1])
     return writer
 
-
 def verify_mobilenetv3(path, sd, bn_eps=1e-3, size=64, seed=0):
-    """Returns (graph_error, file_error): the exact fp32 graph against the plain network, and the written
-    file (with its fp16 weights) against the plain network. Errors are relative to max(|logit|, 1)."""
     x = np.random.RandomState(seed).randn(3, size, size)
     want = mobilenetv3_small_forward({k: np.asarray(v, dtype=np.float64) for k, v in sd.items()}, x, bn_eps)
     span = max(float(np.max(np.abs(want))), 1.0)
@@ -387,7 +329,6 @@ def verify_mobilenetv3(path, sd, bn_eps=1e-3, size=64, seed=0):
     file_err = float(np.max(np.abs(run_graph(meta, stored, x).reshape(-1) - want))) / span
     return graph_err, file_err
 
-
 def detect_architecture(sd):
     if "conv_first.weight" in sd and any(k.startswith("body.") for k in sd):
         return "rrdbnet"
@@ -396,7 +337,6 @@ def detect_architecture(sd):
     raise ConversionError("unrecognised checkpoint: supported networks are the x4 RRDBNet (basicsr / Real-ESRGAN "
                           "keys: conv_first, body.N.rdb1...) and torchvision MobileNetV3-Small classifiers "
                           "(keys: features.N.block..., classifier.3)")
-
 
 def convert(input_path, output_path, fp16=True, name=None, author="", license="", lrelu_slope=0.2,
             res_scale=0.2, verify=True, allow_pickle=False, log=print, classes=None, input_size=224,
@@ -425,7 +365,6 @@ def convert(input_path, output_path, fp16=True, name=None, author="", license=""
             % (graph_err, quant_err))
     return output_path
 
-
 def _convert_classifier(sd, output_path, fp16, name, author, license, verify, log, classes, input_size, mean, std, bn_eps):
     writer = build_mobilenetv3_small(sd, name, classes, input_size, mean, std, fp16, bn_eps, author, license)
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -446,8 +385,6 @@ def _convert_classifier(sd, output_path, fp16, name, author, license, verify, lo
         log("verified: graph matches the network (%.1e), fp16 storage changes the logits by %.1e" % (graph_err, file_err))
     return output_path
 
-
-# Backwards compatible name used by older scripts.
 class VVAExporter:
     def __init__(self, pth_path, allow_pickle=False):
         self.pth_path = pth_path

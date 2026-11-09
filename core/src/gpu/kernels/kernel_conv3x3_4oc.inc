@@ -1,5 +1,3 @@
-// 3x3 convolution computing 4 pixels x 4 output channels per invocation (fewer registers, more invocations).
-// The 8-channel weight blocks are shared with the other variants: z = 2 * block + hb.
 int x0 = int(gl_GlobalInvocationID.x) * 4;
 int y = int(gl_GlobalInvocationID.y) + P_YBASE;
 int g = int(gl_GlobalInvocationID.z);

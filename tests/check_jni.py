@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Checks that every `native` method in VVAEngine.java has a matching JNI function in vva_jni.cpp
-(same name, same parameter and return types). A mismatch only shows up at run time on a phone
-(UnsatisfiedLinkError or a crash), so it is checked here at build time.
-
-Run from the repository root:  python3 tests/check_jni.py
-"""
 
 import os
 import re
@@ -17,10 +11,8 @@ CPP = os.path.join(ROOT, "android/vva-android/src/main/cpp/vva_jni.cpp")
 JAVA_TO_JNI = {"long": "jlong", "int": "jint", "boolean": "jboolean", "float": "jfloat", "void": "void",
                "String": "jstring", "float[]": "jfloatArray"}
 
-
 def jni_type(java_type):
     return JAVA_TO_JNI.get(java_type, "jobject")
-
 
 def main():
     java = open(JAVA).read()
@@ -34,7 +26,7 @@ def main():
     for m in re.finditer(r"JNIEXPORT\s+(\w+)\s+JNICALL\s+Java_com_vva_engine_VVAEngine_(\w+)\(([^)]*)\)", cpp, re.S):
         ret, name, params = m.groups()
         types = [p.strip().split()[0] for p in params.replace("\n", " ").split(",") if p.strip()]
-        implemented[name] = (ret, types[2:])  # drop JNIEnv* and jclass
+        implemented[name] = (ret, types[2:])
     problems = []
     for name, sig in sorted(declared.items()):
         if name not in implemented:
@@ -50,7 +42,6 @@ def main():
         print("FAIL:", p)
     print("check_jni: %d native methods, %d problems" % (len(declared), len(problems)))
     return 1 if problems else 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

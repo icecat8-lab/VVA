@@ -1,6 +1,3 @@
-// Minimal, dependency-free JSON parser used for the .vva metadata block.
-// Strict enough for untrusted input: bounded nesting depth, no recursion
-// beyond kMaxDepth, every failure reports a message instead of crashing.
 #ifndef VVA_JSON_H
 #define VVA_JSON_H
 
@@ -23,8 +20,8 @@ struct Value {
     double number = 0.0;
     std::string string;
     std::vector<Value> array;
-    std::vector<std::string> keys;  // Object member names, same order as `members`
-    std::vector<Value> members;     // Object member values
+    std::vector<std::string> keys;
+    std::vector<Value> members;
 
     bool isNull() const { return type == Type::Null; }
     bool isBool() const { return type == Type::Bool; }
@@ -33,7 +30,6 @@ struct Value {
     bool isArray() const { return type == Type::Array; }
     bool isObject() const { return type == Type::Object; }
 
-    // Returns the first member with this key, or nullptr.
     const Value* find(const std::string& key) const {
         if (type != Type::Object) return nullptr;
         for (size_t i = 0; i < keys.size(); ++i) {
@@ -122,7 +118,7 @@ private:
 
     bool parseObject(Value& out, int depth) {
         out.type = Value::Type::Object;
-        ++p_;  // '{'
+        ++p_;
         skipWhitespace();
         if (p_ < end_ && *p_ == '}') {
             ++p_;
@@ -157,7 +153,7 @@ private:
 
     bool parseArray(Value& out, int depth) {
         out.type = Value::Type::Array;
-        ++p_;  // '['
+        ++p_;
         skipWhitespace();
         if (p_ < end_ && *p_ == ']') {
             ++p_;
@@ -221,7 +217,7 @@ private:
     }
 
     bool parseString(std::string& out) {
-        ++p_;  // opening quote
+        ++p_;
         out.clear();
         for (;;) {
             if (p_ >= end_) return fail("unterminated string");
@@ -276,7 +272,6 @@ private:
         const size_t len = static_cast<size_t>(p_ - start);
         if (len == 0 || len > 64) return fail("invalid number");
 
-        // Locale-independent parsing (an app may have changed the C locale).
         std::istringstream stream(std::string(start, len));
         stream.imbue(std::locale::classic());
         double value = 0.0;
@@ -296,7 +291,7 @@ inline bool parse(const char* data, size_t size, Value& out, std::string& error)
     return parser.parse(out, error);
 }
 
-}  // namespace json
-}  // namespace vva
+}
+}
 
-#endif  // VVA_JSON_H
+#endif

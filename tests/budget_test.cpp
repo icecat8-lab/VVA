@@ -1,4 +1,3 @@
-// Memory budget helpers of the engine (included directly to reach the anonymous namespace).
 #include <cstdio>
 
 #include "../core/src/vva.cpp"
@@ -27,7 +26,6 @@ int main() {
     CHECK(vva::autoBudgetBytes(3200000) == 768 * mb, "3.2 GB free (a quarter is 781 MB) is capped at the ceiling");
     CHECK(vva::autoBudgetBytes(100000000) == 768 * mb, "lots of memory: the ceiling");
     CHECK(vva::currentAutoBudget() >= 320 * mb && vva::currentAutoBudget() <= 768 * mb, "the live value is within the limits");
-    // --- remembered GPU test results ---
     vva::GpuConfig c;
     c.identity = "Adreno (TM) 642L|vendor 0x5143|driver 0x1";
     c.usable = true;

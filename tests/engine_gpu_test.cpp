@@ -1,6 +1,3 @@
-// Engine behaviour with a GPU backend: device selection, self-test, tiling, and falling back to the CPU when the
-// GPU fails or lies. The backend here replays the real GPU program on the host (tests/gpu_emu.cpp).
-//   engine_gpu_test <rrdbnet.vva>   (channels must be multiples of 8)
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,10 +23,10 @@ static int g_checks = 0, g_failed = 0;
 using vva::gpu::Backend;
 
 struct Mode {
-    int failOnCall = -1;      // 1-based call index at which run() fails (-1: never)
-    bool deviceLost = false;  // report DeviceLost instead of Error
-    float corrupt = 0.f;      // added to every output value
-    int badMask = 0;          // kernel variants (bit per variant) that return wrong numbers
+    int failOnCall = -1;
+    bool deviceLost = false;
+    float corrupt = 0.f;
+    int badMask = 0;
     std::string identity = "emulated";
 };
 
@@ -138,7 +135,6 @@ int main(int argc, char** argv) {
     const std::vector<uint8_t> in = makeImage(W, H);
     const vva::DeviceType kAuto = vva::DeviceType::AUTO;
 
-    // CPU reference result.
     vva::Engine ref;
     CHECK(ref.loadModel(argv[1]), "model loads");
     CHECK(!ref.gpuActive() && !ref.gpuStatus().empty(), "without Vulkan the status explains why");
@@ -148,7 +144,7 @@ int main(int argc, char** argv) {
     CHECK(ref.processImageTile(in.data(), W, H, want.data(), kAuto), "CPU reference run");
     CHECK(ref.lastDevice() == vva::DeviceType::CPU_NEON, "reference ran on the CPU");
 
-    {  // A good GPU backend is verified, adopted and used for every tile.
+    {
         vva::Engine e;
         e.loadModel(argv[1]);
         e.setTileSize(16);
@@ -162,13 +158,11 @@ int main(int argc, char** argv) {
         CHECK(b->calls - probeCalls == 6, "one GPU run per tile (3x2 tiles)");
         CHECK(maxDiff(got, want) <= 1, "GPU result equals the CPU result");
 
-        // The caller can force the CPU.
         const int before = b->calls;
         CHECK(e.processImageTile(in.data(), W, H, got.data(), vva::DeviceType::CPU_NEON), "forced CPU run");
         CHECK(b->calls == before && e.lastDevice() == vva::DeviceType::CPU_NEON, "CPU_NEON does not touch the GPU");
         CHECK(maxDiff(got, want) == 0, "CPU runs are identical");
 
-        // A small memory budget makes the engine choose smaller tiles with the GPU's own estimate.
         e.setTileSize(0);
         e.setMemoryBudgetMB(16);
         int tiles = 0;
@@ -181,13 +175,13 @@ int main(int argc, char** argv) {
         e.setProgressCallback(nullptr);
     }
 
-    for (int lost = 0; lost < 2; ++lost) {  // The GPU fails in the middle of a job: the job still succeeds on the CPU.
+    for (int lost = 0; lost < 2; ++lost) {
         vva::Engine e;
         e.loadModel(argv[1]);
         e.setTileSize(16);
         e.setTilePad(8);
         Mode m;
-        m.failOnCall = 3 + 3;  // the self-test uses calls 1..1 (no speed check); fail on the 5th tile
+        m.failOnCall = 3 + 3;
         m.deviceLost = lost == 1;
         EmuBackend* b = attach(e, *model, m);
         CHECK(e.gpuActive(), "backend adopted before the failure");
@@ -202,13 +196,13 @@ int main(int argc, char** argv) {
         CHECK(e.processImageTile(in.data(), W, H, again.data(), kAuto) && maxDiff(again, want) <= 1, "later jobs run on the CPU");
     }
 
-    {  // Kernel variants: the self-test skips a wrong one and keeps a correct one.
+    {
         vva::Engine e;
         e.loadModel(argv[1]);
         e.setTileSize(16);
         e.setTilePad(8);
         Mode m;
-        m.badMask = 1 << 0;  // the default variant is wrong
+        m.badMask = 1 << 0;
         EmuBackend* b = attach(e, *model, m);
         CHECK(e.gpuActive() && b->variantIndex() == 1, "a wrong variant is skipped and the next correct one is used");
         std::vector<uint8_t> got(outBytes);
@@ -219,7 +213,7 @@ int main(int argc, char** argv) {
         all.badMask = 7;
         attach(e2, *model, all);
         CHECK(!e2.gpuActive() && e2.gpuStatus().find("wrong results") != std::string::npos, "every variant wrong -> GPU rejected");
-        for (int v = 0; v < 3; ++v) {  // each variant on its own gives the same picture as the CPU
+        for (int v = 0; v < 3; ++v) {
             vva::Engine e3;
             e3.loadModel(argv[1]);
             e3.setTileSize(16);
@@ -233,7 +227,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    {  // A GPU that returns wrong numbers is rejected by the self-test.
+    {
         vva::Engine e;
         e.loadModel(argv[1]);
         Mode m;
@@ -246,7 +240,7 @@ int main(int argc, char** argv) {
         CHECK(e.processImageTile(in.data(), W, H, got.data(), kAuto) && maxDiff(got, want) <= 1, "processing continues on the CPU");
     }
 
-    {  // Explicit GPU request without a usable GPU fails clearly.
+    {
         vva::Engine e;
         e.loadModel(argv[1]);
         std::vector<uint8_t> got(outBytes);
@@ -256,7 +250,7 @@ int main(int argc, char** argv) {
         CHECK(e.processImageTile(in.data(), W, H, got.data(), kAuto), "AUTO still works afterwards");
     }
 
-    {  // Cancelling while the GPU works.
+    {
         vva::Engine e;
         e.loadModel(argv[1]);
         e.setTileSize(16);
@@ -271,13 +265,13 @@ int main(int argc, char** argv) {
         CHECK(e.gpuActive(), "a cancel does not disable the GPU");
     }
 
-    {  // Test results are remembered per device (next to the model), so start-up does not repeat the tuning.
+    {
         const std::string cfg = std::string(argv[1]) + ".gpucfg";
         std::remove(cfg.c_str());
         vva::Engine e;
         e.loadModel(argv[1]);
         const int r0 = EmuBackend::totalRuns;
-        attach(e, *model, Mode(), true);  // the emulated GPU is slower than the CPU executor
+        attach(e, *model, Mode(), true);
         CHECK(!e.gpuActive() && e.gpuStatus().find("not faster") != std::string::npos, ("a slow GPU is rejected: " + e.gpuStatus()).c_str());
         CHECK(EmuBackend::totalRuns > r0, "the first test really ran the GPU");
         std::FILE* f = std::fopen(cfg.c_str(), "rb");
@@ -296,7 +290,7 @@ int main(int argc, char** argv) {
         CHECK(EmuBackend::totalRuns == r1, "a remembered verdict skips the GPU test entirely");
         CHECK(!e2.gpuActive() && e2.gpuStatus().find("earlier test") != std::string::npos, ("status explains: " + e2.gpuStatus()).c_str());
 
-        vva::Engine e3;  // another GPU or driver (different identity) is tested again
+        vva::Engine e3;
         e3.loadModel(argv[1]);
         Mode other;
         other.identity = "another gpu|driver 0x2";
@@ -306,7 +300,7 @@ int main(int argc, char** argv) {
         std::remove(cfg.c_str());
     }
 
-    {  // The profile and status texts come from the backend.
+    {
         vva::Engine e;
         e.loadModel(argv[1]);
         attach(e, *model, Mode());
@@ -317,7 +311,7 @@ int main(int argc, char** argv) {
         CHECK(none.gpuProfile(8, 8).find("not active") != std::string::npos, "gpuProfile explains when the GPU is off");
     }
 
-    {  // Destroying an engine tears its GPU backend down (it must happen before the Vulkan device goes away).
+    {
         const int before = EmuBackend::destroyed;
         {
             vva::Engine e;
@@ -327,7 +321,7 @@ int main(int argc, char** argv) {
         }
         CHECK(EmuBackend::destroyed == before + 1, "the backend is destroyed together with the engine");
         {
-            vva::Engine e;  // a backend that was dropped after a failure must not be destroyed twice
+            vva::Engine e;
             e.loadModel(argv[1]);
             Mode m;
             m.failOnCall = 2;

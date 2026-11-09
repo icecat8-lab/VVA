@@ -33,12 +33,10 @@ namespace {
 constexpr size_t kMiB = 1024u * 1024u;
 constexpr int kMaxImageSide = 1 << 16;
 
-// ---- PIL-style antialiased bilinear resize (what torchvision's Resize uses on PIL images) ----
-
 struct AxisTaps {
-    std::vector<int> first;   // first source index per output index
-    std::vector<int> count;   // number of taps per output index
-    std::vector<float> w;     // weights, `stride` entries per output index
+    std::vector<int> first;
+    std::vector<int> count;
+    std::vector<float> w;
     int stride = 0;
 };
 
@@ -46,7 +44,7 @@ AxisTaps bilinearTaps(int inSize, int outSize) {
     AxisTaps t;
     const double scale = static_cast<double>(inSize) / static_cast<double>(outSize);
     const double filterScale = scale > 1.0 ? scale : 1.0;
-    const double support = filterScale;  // bilinear support is 1
+    const double support = filterScale;
     t.stride = static_cast<int>(std::ceil(support)) * 2 + 1;
     t.first.assign(static_cast<size_t>(outSize), 0);
     t.count.assign(static_cast<size_t>(outSize), 0);
@@ -84,7 +82,6 @@ inline uint8_t roundToByte(float v) {
     return static_cast<uint8_t>(v);
 }
 
-// RGBA8 (w x h) -> RGB8 (size x size); the intermediate image is 8 bit, like PIL's two-pass resample.
 void resizeRgb8(const uint8_t* rgba, int w, int h, int size, std::vector<uint8_t>& out) {
     const AxisTaps tx = bilinearTaps(w, size);
     const AxisTaps ty = bilinearTaps(h, size);
@@ -120,8 +117,6 @@ void resizeRgb8(const uint8_t* rgba, int w, int h, int size, std::vector<uint8_t
     }
 }
 
-// Memory available for activations when the caller does not set a budget. Bigger tiles mean less overlapping
-// work (measured: 320 -> 512 MB made a 256x384 upscale 18% faster), so use a share of the free RAM.
 long parseMemAvailableKb(const std::string& text) {
     const std::string key = "MemAvailable:";
     const size_t pos = text.find(key);
@@ -146,8 +141,6 @@ size_t currentAutoBudget() {
     buf[n] = 0;
     return autoBudgetBytes(parseMemAvailableKb(buf));
 }
-
-// ---- what the GPU self-test learned about this device (stored next to the model) ----
 
 struct GpuConfig {
     std::string identity;
@@ -197,7 +190,6 @@ bool parseGpuConfig(const std::string& text, GpuConfig& c) {
     return haveIdentity && haveUsable;
 }
 
-// A remembered result is valid for the same GPU and driver, for 30 days.
 bool gpuConfigFresh(const GpuConfig& c, const std::string& identity, int variants, long long nowSeconds) {
     if (c.identity != identity || c.variant < 0 || c.variant >= variants) return false;
     const long long age = nowSeconds - c.when;
@@ -216,18 +208,17 @@ bool readTextFile(const std::string& path, std::string& text) {
 
 void writeTextFile(const std::string& path, const std::string& text) {
     std::FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) return;  // a read-only folder just means the result is not remembered
+    if (!f) return;
     std::fwrite(text.data(), 1, text.size(), f);
     std::fclose(f);
 }
 
 inline float clamp01(float v) {
-    if (!(v > 0.f)) return 0.f;  // also maps NaN to 0
+    if (!(v > 0.f)) return 0.f;
     if (v > 1.f) return 1.f;
     return v;
 }
 
-// Bilinear upscaling of the alpha channel (pixel centres aligned).
 void upscaleAlpha(const uint8_t* in, int w, int h, uint8_t* out, int s) {
     const int ow = w * s, oh = h * s;
     const float inv = 1.0f / static_cast<float>(s);
@@ -257,13 +248,11 @@ void upscaleAlpha(const uint8_t* in, int w, int h, uint8_t* out, int s) {
     }
 }
 
-}  // namespace
+}
 
 class Engine::Impl {
 public:
     ~Impl() {
-        // The GPU backend uses the Vulkan device owned by vkContext, which is declared later and would be
-        // destroyed first. Tear the backend down while the device still exists.
         gpuBackend.reset();
     }
 
@@ -273,16 +262,16 @@ public:
     mutable std::mutex errorMutex;
     std::string error;
 
-    std::mutex runMutex;  // one job (or model load) at a time
+    std::mutex runMutex;
     std::atomic<bool> cancelFlag{false};
 
     std::string modelPath;
-    int classifierSize = 0;  // square input size of a classifier model (0 for image models)
+    int classifierSize = 0;
 
     int tileSize = 0;
     int tilePad = 16;
     int threads = 0;
-    int budgetMB = 0;  // 0 = automatic
+    int budgetMB = 0;
     ProgressCallback progress;
     DeviceType usedDevice = DeviceType::CPU_NEON;
 
@@ -358,7 +347,7 @@ public:
             setError("the model must take 3 input channels and produce 3 output channels (RGB)");
             return false;
         }
-        gpuBackend.reset();  // it points into the previous model
+        gpuBackend.reset();
         modelPath = path;
         model = std::move(loaded);
         exec = std::move(prepared);
@@ -372,8 +361,6 @@ public:
         return true;
     }
 
-    // ---- GPU --------------------------------------------------------------------------------------
-
     static double now() {
         return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
@@ -385,9 +372,6 @@ public:
         }
     }
 
-    // Runs the backend against the CPU executor, for every kernel variant (or only `onlyVariant` when it is >= 0).
-    // Keeps the fastest variant that is correct. Returns an empty string on success, otherwise the reason;
-    // `shortReason` is set when the verdict is stable enough to remember (wrong results, not faster than the CPU).
     std::string verifyBackend(bool checkSpeed, int onlyVariant, std::string* detail, int* chosen, std::string* shortReason) {
         const int ch = exec->inChannels();
         const int h1 = 20, w1 = 24;
@@ -437,7 +421,7 @@ public:
             double worst = 0.0;
             for (size_t i = 0; i < outN; ++i) {
                 const double d = std::fabs(static_cast<double>(cpu[i]) - static_cast<double>(gpuOut[i]));
-                if (!(d <= worst)) worst = d;  // NaN counts as the worst case
+                if (!(d <= worst)) worst = d;
             }
             if (!(worst / range <= 2e-3)) {
                 problem = std::string("the GPU test gave wrong results (error ") + std::to_string(worst / range) + ")";
@@ -445,7 +429,7 @@ public:
             }
             double rate = 0.0;
             if (measure) {
-                if (gpuBackend->run(in2.data(), h2, w2, out2.data(), nullptr, &err) != gpu::Backend::Status::Ok) {  // warm-up
+                if (gpuBackend->run(in2.data(), h2, w2, out2.data(), nullptr, &err) != gpu::Backend::Status::Ok) {
                     problem = "the GPU speed test failed: " + err;
                     wrongOnly = false;
                     continue;
@@ -507,7 +491,7 @@ public:
         int chosen = 0;
         if (cached) {
             problem = verifyBackend(checkSpeed, cfg.variant, &detail, &chosen, &shortReason);
-            if (!problem.empty()) cached = false;  // the remembered kernel no longer works: test everything again
+            if (!problem.empty()) cached = false;
         }
         if (!cached) {
             shortReason.clear();
@@ -547,8 +531,6 @@ public:
         gpuState = "this build has no Vulkan support";
         (void)modelPath;
 #else
-        // A marker file guards against drivers that crash during the start-up test: if the previous test never
-        // finished, the GPU stays off (the marker expires after a day, or can be deleted).
         const std::string marker = modelPath + ".gpuprobe";
         struct stat st;
         if (::stat(marker.c_str(), &st) == 0) {
@@ -591,7 +573,6 @@ public:
         return budgetMB > 0 ? static_cast<size_t>(budgetMB) * kMiB : currentAutoBudget();
     }
 
-    // Largest tile (in input pixels) whose working set fits in the budget.
     int chooseTile(int w, int h, int pad, bool useGpu) const {
         const size_t budget = budgetBytes();
         const int longest = std::max(w, h);
@@ -614,7 +595,7 @@ public:
     }
 
     bool process(const uint8_t* in, int w, int h, uint8_t* out, DeviceType device) {
-        (void)device;  // every device request is served by the CPU executor
+        (void)device;
         std::unique_lock<std::mutex> lock(runMutex, std::try_to_lock);
         if (!lock.owns_lock()) {
             setError("the engine is busy");
@@ -676,7 +657,6 @@ public:
                 const int ry0 = std::max(0, y0 - pad), ry1 = std::min(h, y1 + pad);
                 const int rw = rx1 - rx0, rh = ry1 - ry0;
 
-                // RGBA8 -> planar float RGB in [0, 1]
                 const size_t plane = static_cast<size_t>(rw) * rh;
                 for (int y = 0; y < rh; ++y) {
                     const uint8_t* src = in + (static_cast<size_t>(ry0 + y) * w + rx0) * 4;
@@ -699,7 +679,6 @@ public:
                         return false;
                     }
                     if (gs != gpu::Backend::Status::Ok) {
-                        // Never fail the job because of the GPU: switch to the CPU for this and every later tile.
                         gpuState = "stopped after an error: " + err;
                         gpuBackend.reset();
                         useGpu = false;
@@ -713,7 +692,6 @@ public:
                     return false;
                 }
 
-                // Crop away the overlap and convert back to RGBA8.
                 const int orw = rw * s, orh = rh * s;
                 const size_t oplane = static_cast<size_t>(orw) * orh;
                 const int cx = (x0 - rx0) * s, cy = (y0 - ry0) * s;
@@ -740,7 +718,6 @@ public:
             }
         }
 
-        // Alpha: copy through when opaque, otherwise upscale it separately.
         bool opaque = true;
         const size_t pixels = static_cast<size_t>(w) * h;
         for (size_t i = 0; i < pixels; ++i) {
@@ -912,4 +889,4 @@ std::string Engine::vulkanDeviceName() const {
 #endif
 }
 
-}  // namespace vva
+}

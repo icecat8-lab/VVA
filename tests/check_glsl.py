@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Lints the GPU kernel sources for GLSL rules that the host emulator (plain C++) cannot see.
-
-The kernels are compiled as C++ in the tests, but the GPU compiler is a GLSL compiler: words such as `half`,
-`input` or `sample` are reserved there and make the shader fail to compile (which silently turned a release
-into a CPU-only build once). Run from the repository root:  python3 tests/check_glsl.py
-"""
 
 import os
 import re
@@ -13,7 +7,6 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KERNELS = os.path.join(ROOT, "core", "src", "gpu", "kernels")
 
-# GLSL 4.50 keywords and words reserved for future use that the kernels do not use as keywords.
 RESERVED = set("""
 common partition active asm class union enum typedef template this resource goto inline noinline public static
 extern external interface long short half fixed unsigned superp input output filter sizeof cast namespace using
@@ -23,15 +16,13 @@ writeonly in out inout struct discard true false bool uint
 sampler1D sampler2D sampler3D samplerCube image1D image2D image3D hvec2 hvec3 hvec4 fvec2 fvec3 fvec4 dvec2 dvec3
 dvec4 mat2 mat3 mat4 ivec2 ivec3 ivec4 uvec2 uvec3 uvec4 bvec2 bvec3 bvec4
 """.split())
-# Built-in function names that would clash with user functions.
+
 BUILTINS = set("abs sign floor ceil fract mod min max clamp mix step smoothstep sqrt length distance dot cross "
                "normalize pow exp log round trunc barrier main".split())
-
 
 def strip_comments(text):
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
     return re.sub(r"//[^\n]*", "", text)
-
 
 def main():
     problems = []
@@ -56,7 +47,6 @@ def main():
         print("FAIL:", p)
     print("check_glsl: %d kernel files, %d problems" % (len(files), len(problems)))
     return 1 if problems else 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

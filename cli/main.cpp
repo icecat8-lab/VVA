@@ -1,4 +1,3 @@
-// vva-cli: run .vva models from a terminal (Termux, adb shell, desktop Linux).
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -54,7 +53,7 @@ bool readToken(std::FILE* f, std::string& tok) {
         if (tok.size() > 32) return false;
         c = std::fgetc(f);
     }
-    return true;  // the single whitespace after the token has been consumed
+    return true;
 }
 
 bool readPPM(const char* path, std::vector<uint8_t>& rgba, int& w, int& h, std::string& err) {
@@ -132,7 +131,7 @@ bool parseIntOption(int argc, char** argv, int& i, const char* name, int& out) {
     return true;
 }
 
-}  // namespace
+}
 
 int main(int argc, char** argv) {
     if (argc < 2) {

@@ -1,7 +1,3 @@
-// Test harness: plans a model for the GPU path and replays the program on the host.
-//   gpu_emu_run <model.vva> <in.f32> <C> <H> <W> <out.f32> [second_H second_W]
-// With the optional second size the same emulator instance is reused for a second image of that size
-// (this exercises the "zero the memory when the layout changes" rule), and only that result is written.
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -52,7 +48,7 @@ int main(int argc, char** argv) {
                     prog.arenaBytes, prog.flops);
         return true;
     };
-    if (argc == 9) {  // first a different-sized image with unrelated data, then the one that is compared
+    if (argc == 9) {
         const int h2 = std::atoi(argv[7]), w2 = std::atoi(argv[8]);
         std::vector<float> noise(static_cast<size_t>(c) * h2 * w2);
         for (size_t i = 0; i < noise.size(); ++i) noise[i] = static_cast<float>((i * 7919) % 1000) / 1000.f + 0.5f;

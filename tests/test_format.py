@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""Round-trip and robustness tests for the .vva v2 container.
-
-Python writes files, the production C++ reader (built here with sanitizers when
-available) reads them, and the results are cross-checked. Malformed files must be
-rejected with a message and must never crash the reader.
-
-Run from the repository root:  python3 tests/test_format.py
-"""
 
 import importlib.util
 import os
@@ -29,14 +21,12 @@ WORK = tempfile.mkdtemp(prefix="vva_test_")
 FAILURES = []
 CHECKS = 0
 
-
 def check(condition, description):
     global CHECKS
     CHECKS += 1
     if not condition:
         FAILURES.append(description)
         print("  FAIL:", description)
-
 
 def build_reader():
     exe = os.path.join(WORK, "read_test")
@@ -54,18 +44,14 @@ def build_reader():
         sys.exit("cannot build the C++ reader")
     return exe, False
 
-
 READER, SANITIZED = build_reader()
 ENV = dict(os.environ, ASAN_OPTIONS="exitcode=99:detect_leaks=0", UBSAN_OPTIONS="halt_on_error=1:exitcode=98")
-
 
 def run_reader(path):
     result = subprocess.run([READER, path], capture_output=True, text=True, env=ENV, timeout=60)
     return result.returncode, result.stdout, result.stderr
 
-
 def sample_writer():
-    """A small RRDB-style graph: conv, leaky relu, concat, scalar mul, residual add, nearest upsample."""
     rng = np.random.default_rng(1234)
     w = ff.VVAWriter(name="test-rrdb", scale=4, author="tests", license="BSD-3-Clause")
     w.add_input("input", [1, 3, -1, -1])
@@ -87,7 +73,6 @@ def sample_writer():
     w.add_output("output", [1, 3, -1, -1])
     return w
 
-
 def parse_summary(stdout):
     info = {"nodes_list": [], "tensor_map": {}}
     for line in stdout.splitlines():
@@ -105,13 +90,11 @@ def parse_summary(stdout):
                                          "crc": int(parts[5], 16), "aligned": parts[6] == "aligned=1"}
     return info
 
-
 def write(name, data):
     path = os.path.join(WORK, name)
     with open(path, "wb") as f:
         f.write(data)
     return path
-
 
 def expect_rejected(name, data, message_part):
     path = write(name, data)
@@ -119,9 +102,7 @@ def expect_rejected(name, data, message_part):
     check(code == 1, "%s: reader must reject (exit 1), got %d %s" % (name, code, err[-200:]))
     check(message_part in out, "%s: expected '%s' in output, got: %s" % (name, message_part, out.strip()))
 
-
 def raw_file(meta_bytes, data=b"", header_overrides=None):
-    """Build a file image from raw metadata bytes (valid checksum), optionally patching header fields."""
     meta_offset = ff.HEADER_SIZE
     data_offset = (meta_offset + len(meta_bytes) + 63) // 64 * 64
     pad = b"\x00" * (data_offset - meta_offset - len(meta_bytes))
@@ -131,7 +112,6 @@ def raw_file(meta_bytes, data=b"", header_overrides=None):
     header = ff._HEADER.pack(ff.MAGIC, 64, 0, 0, fields["meta_offset"], fields["meta_size"], fields["data_offset"],
                              fields["data_size"], fields["file_size"], fields["crc"], 0)
     return header + meta_bytes + pad + data
-
 
 def main():
     import json
@@ -262,7 +242,6 @@ def main():
 
     print("\n%d checks, %d failed" % (CHECKS, len(FAILURES)))
     return 1 if FAILURES else 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

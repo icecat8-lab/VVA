@@ -1,18 +1,4 @@
-"""Pure-numpy reference implementations used to verify conversions and the engine.
-
-Two independent pieces live here:
-
-* ``run_graph``       executes a ``.vva`` graph (operators from docs/FORMAT.md).
-* ``rrdbnet_forward`` runs an RRDBNet straight from its state dict, written the
-                      way the PyTorch model is written, without using any graph.
-
-Comparing the two proves that a converted graph computes the same function as the
-original network; comparing either with the C++ engine checks the engine.
-Everything is computed in float64 on arrays shaped [C, H, W] (batch 1).
-"""
-
 import numpy as np
-
 
 def conv2d(x, w, b=None, stride=(1, 1), padding=(0, 0), dilation=(1, 1), groups=1):
     x = np.asarray(x, dtype=np.float64)
@@ -26,7 +12,7 @@ def conv2d(x, w, b=None, stride=(1, 1), padding=(0, 0), dilation=(1, 1), groups=
     wo = (wd + 2 * pw - dw * (kw - 1) - 1) // sw + 1
     xp = np.pad(x, ((0, 0), (ph, ph), (pw, pw)))
     out = np.zeros((out_c, ho, wo), dtype=np.float64)
-    if groups == x.shape[0] == out_c and ig == 1:  # depthwise: one filter per channel
+    if groups == x.shape[0] == out_c and ig == 1:
         for ky in range(kh):
             for kx in range(kw):
                 patch = xp[:, ky * dh: ky * dh + sh * (ho - 1) + 1: sh, kx * dw: kx * dw + sw * (wo - 1) + 1: sw]
@@ -47,30 +33,23 @@ def conv2d(x, w, b=None, stride=(1, 1), padding=(0, 0), dilation=(1, 1), groups=
         out += np.asarray(b, dtype=np.float64)[:, None, None]
     return out
 
-
 def leaky_relu(x, alpha):
     return np.where(x > 0, x, x * alpha)
-
 
 def hardswish(x):
     return x * np.clip(x + 3.0, 0.0, 6.0) / 6.0
 
-
 def hardsigmoid(x):
     return np.clip(x + 3.0, 0.0, 6.0) / 6.0
 
-
 def resize_nearest(x, sh, sw):
     return np.repeat(np.repeat(x, sh, axis=1), sw, axis=2)
-
 
 def pixel_shuffle(x, r):
     c, h, w = x.shape
     return x.reshape(c // (r * r), r, r, h, w).transpose(0, 3, 1, 4, 2).reshape(c // (r * r), h * r, w * r)
 
-
 def run_graph(meta, tensors, x):
-    """Execute the graph described by ``meta`` (as returned by read_vva) on x [C,H,W]."""
     values = dict(tensors)
     values[meta["inputs"][0]["name"]] = np.asarray(x, dtype=np.float64)
     for node in meta["nodes"]:
@@ -109,9 +88,7 @@ def run_graph(meta, tensors, x):
         values[node["outputs"][0]] = np.asarray(out, dtype=np.float64)
     return values[meta["outputs"][0]["name"]]
 
-
 def rrdbnet_forward(sd, x, lrelu_slope=0.2, res_scale=0.2):
-    """RRDBNet (x4, basicsr / Real-ESRGAN layout) computed directly from a state dict."""
     def conv(prefix, t):
         return conv2d(t, sd[prefix + ".weight"], sd[prefix + ".bias"], padding=(1, 1))
 
@@ -141,8 +118,6 @@ def rrdbnet_forward(sd, x, lrelu_slope=0.2, res_scale=0.2):
     feat = act(conv("conv_up2", resize_nearest(feat, 2, 2)))
     return conv("conv_last", act(conv("conv_hr", feat)))
 
-
-# MobileNetV3-Small (torchvision layout): (in, kernel, expanded, out, squeeze-excite, activation, stride)
 MBV3_SMALL = [
     (16, 3, 16, 16, True, "RE", 2), (16, 3, 72, 24, False, "RE", 2), (24, 3, 88, 24, False, "RE", 1),
     (24, 5, 96, 40, True, "HS", 2), (40, 5, 240, 40, True, "HS", 1), (40, 5, 240, 40, True, "HS", 1),
@@ -150,10 +125,7 @@ MBV3_SMALL = [
     (96, 5, 576, 96, True, "HS", 1), (96, 5, 576, 96, True, "HS", 1),
 ]
 
-
 def mobilenetv3_small_forward(sd, x, bn_eps=1e-3):
-    """torchvision MobileNetV3-Small computed from its state dict, BatchNorm applied explicitly (no folding).
-    x is [3,H,W] (already normalised); returns the logits [classes]."""
     def conv_bn(conv, bn, t, stride, pad, groups, act):
         t = conv2d(t, sd[conv + ".weight"], None, (stride, stride), (pad, pad), (1, 1), groups)
         g = np.asarray(sd[bn + ".weight"], dtype=np.float64)
