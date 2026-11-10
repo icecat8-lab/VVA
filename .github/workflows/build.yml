@@ -28,6 +28,9 @@ jobs:
           /tmp/venv/bin/pip install --quiet numpy pillow
           /tmp/venv/bin/python tests/test_format.py
           /tmp/venv/bin/python tests/test_converter.py
+          /tmp/venv/bin/python tests/test_ops.py
+          /tmp/venv/bin/python tests/test_archs.py
+          /tmp/venv/bin/python tests/test_onnx.py
           /tmp/venv/bin/python tests/test_engine.py
           /tmp/venv/bin/python tests/test_gpu_plan.py
           /tmp/venv/bin/python tests/check_jni.py

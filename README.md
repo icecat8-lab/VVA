@@ -11,15 +11,34 @@ checkpoints.
 
 | Kind | Architecture | Use |
 |------|--------------|-----|
-| Upscaler | x4 RRDBNet (basicsr / Real-ESRGAN layout) | `upscale()` |
+| Upscaler | RRDBNet x1 / x2 / x4 (basicsr and Real-ESRGAN layout, and the old ESRGAN layout such as 4x-UltraSharp) | `upscale()` |
+| Upscaler | SRVGGNetCompact x1 / x2 / x4 (realesr-general-x4v3, realesr-animevideov3) | `upscale()` |
+| Upscaler / enhancer | Any convolutional RGB image-to-image network exported to ONNX (see below) | `upscale()` |
 | Classifier | torchvision MobileNetV3-Small | `classify()`, for example to pick an upscaler |
 
-Other architectures are rejected by the converter with an explanation of what is missing.
+Other `.pth` architectures are rejected by the converter with an explanation of what is missing.
+
+### Converting from ONNX
+
+`vva-convert -i model.onnx -o model.vva` reads the ONNX file with a built-in parser (no `onnx` package needed, so
+it works in Termux). Supported operators: Conv, ConvTranspose, BatchNormalization (folded into the previous
+convolution when possible), Relu, LeakyRelu, PRelu, Sigmoid, Tanh, HardSwish, HardSigmoid, Clip, Add, Sub, Mul, Div
+(between activations, or with a constant per channel), Concat (channels), Resize / Upsample (integer scale factors;
+nearest, or linear with half_pixel / align_corners), DepthToSpace (mode CRD, which is what `nn.PixelShuffle`
+exports), MaxPool, AveragePool, GlobalAveragePool, Pad (constant, reflect, edge), Slice and Split (channels),
+Identity, Dropout and Constant. The model needs one image input `[1, C, H, W]` with dynamic height and width (a fixed
+size is made dynamic with a note) and one output whose size is an exact integer multiple of the input size.
+Export tips: use `opset_version >= 11`, `dynamic_axes` for H and W, and `torch.onnx.export(..., do_constant_folding=True)`.
+Not supported: transformers (MatMul, Softmax, LayerNorm, Reshape/Transpose), InstanceNorm, per-tile statistics, and
+`auto_pad=SAME_*` (export with explicit padding). The numerical check at the end of the conversion compares the
+stored (fp16) file with the float32 network.
 
 ## Limitations
 
 * The CPU path works everywhere. On a mid-range phone, the 6-block RRDBNet used for testing needs about
   15 seconds to turn a 128x192 image into 512x768 with 8 threads. Measure on your own target device.
+* Models with operators beyond the RRDBNet set (everything added for ONNX and SRVGGNetCompact: PReLU, transposed
+  convolution, pooling, bilinear resize, padding, ...) run on the CPU. The engine falls back to the CPU on its own.
 * A Vulkan GPU path exists for RRDBNet-style graphs (3x3 convolutions, LeakyReLU, residual adds, concat,
   nearest resize; channel counts must be multiples of 8). It is verified on the host against the CPU, but it
   has not been verified on real hardware yet, so it checks itself before use (see "GPU" below). There is no NPU

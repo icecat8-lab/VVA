@@ -99,7 +99,19 @@ v2 core set.
 | `GlobalAveragePool` | `x` | mean over height and width, output `[C, 1, 1]` |
 | `Concat` | two or more tensors | `axis` (1) |
 | `ResizeNearest` | `x` | `scale [sh, sw]` (integers; nearest-neighbour like `torch.nn.functional.interpolate(mode="nearest")`) |
-| `PixelShuffle` | `x` | `upscale` (integer) |
+| `PixelShuffle` | `x` | `upscale` (integer; PyTorch channel order) |
+| `PixelUnshuffle` | `x` | `downscale` (integer; PyTorch channel order). Height and width must be multiples of it; the engine pads tiles automatically when this op is applied to the model input |
+| `Sub` | `a`, `b` (same shape) | - |
+| `PReLU` | `x`, `slope` (constant, `[C]` or `[1]`) | - |
+| `Tanh` | `x` | - |
+| `SiLU` | `x` | `x * sigmoid(x)` |
+| `ChannelAffine` | `x`, `scale [C]`, `shift [C]` (constants) | `x * scale + shift` per channel (batch norm in inference mode, constant Mul/Add/Sub/Div) |
+| `ConvTranspose2D` | `x`, `weight [I, O, kh, kw]`, optional `bias [O]` | `stride` (1,1), `padding` (0,0), `output_padding` (0,0); groups = 1 |
+| `MaxPool2D` | `x` | `kernel [kh,kw]` (required), `stride` (= kernel), `padding` (0,0; at most half the kernel) |
+| `AvgPool2D` | `x` | as `MaxPool2D`, plus `count_include_pad` (false) |
+| `ResizeBilinear` | `x` | `scale [sh, sw]` (integers), `align_corners` (false; false = half-pixel like PyTorch) |
+| `Pad` | `x` | `pads [top, left, bottom, right]`, `mode` (`constant`, `reflect` or `replicate`), `value` (0) |
+| `Slice` | `x` | `start`, `end` (channel range) |
 
 ## What the VVA engine executes
 
@@ -112,7 +124,8 @@ runs when:
 - the engine entry point (`processImageTile`) additionally needs 3 input and 3
   output channels (RGB, values in 0..1);
 - every operator is in the core set above; constants are only accepted as the
-  `weight` / `bias` inputs of `Conv2D`, all other operands must be activations;
+  `weight` / `bias` inputs of `Conv2D` / `ConvTranspose2D` and the parameter inputs of
+  `PReLU` / `ChannelAffine`, all other operands must be activations;
 - `Concat` joins along the channel axis (`axis` 1);
 - the output is an exact integer multiple of the input size, the same for height
   and width (this is what makes tiling possible) and equals `meta.scale` when that

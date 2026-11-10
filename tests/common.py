@@ -81,7 +81,8 @@ def build_binaries(sanitize=True):
         objs.append(obj)
     exes = {}
     for name, src in (("exec_run", "tests/exec_run.cpp"), ("engine_test", "tests/engine_test.cpp"),
-                      ("vva-cli", "cli/main.cpp")):
+                      ("vva-cli", "cli/main.cpp"),
+                      ("engine_multiple_test", "tests/engine_multiple_test.cpp")):
         exe = os.path.join(WORK, name + (".san" if sanitize else ""))
         result = run(["g++"] + flags + [os.path.join(ROOT, src)] + objs + ["-o", exe])
         if result.returncode != 0:
@@ -91,15 +92,16 @@ def build_binaries(sanitize=True):
     return exes
 
 ENV = dict(os.environ, ASAN_OPTIONS="exitcode=99:detect_leaks=0", UBSAN_OPTIONS="halt_on_error=1:exitcode=98")
+ENV_ANY = dict(ENV, VVA_ANY_OUTPUT="1")
 
-def exec_run(exe, model, x, threads=1):
+def exec_run(exe, model, x, threads=1, any_output=False):
     c, h, w = x.shape
     inp = os.path.join(WORK, "in.f32")
     out = os.path.join(WORK, "out.f32")
     np.ascontiguousarray(x, dtype=np.float32).tofile(inp)
     if os.path.exists(out):
         os.remove(out)
-    r = run([exe, model, inp, str(c), str(h), str(w), out, str(threads)], env=ENV)
+    r = run([exe, model, inp, str(c), str(h), str(w), out, str(threads)], env=ENV_ANY if any_output else ENV)
     text = (r.stdout + r.stderr).strip()
     if r.returncode != 0:
         return text, None

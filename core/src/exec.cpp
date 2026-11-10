@@ -49,7 +49,10 @@ float halfToFloat(uint16_t h) {
 
 namespace {
 
-enum class Op { Conv, Add, Mul, MulScalar, LeakyReLU, ReLU, Sigmoid, Clip, Hardswish, Hardsigmoid, GlobalPool, Concat, Resize, PixelShuffle };
+enum class Op {
+    Conv, Add, Sub, Mul, MulScalar, LeakyReLU, ReLU, PReLU, Sigmoid, Tanh, SiLU, Clip, Hardswish, Hardsigmoid, GlobalPool,
+    Concat, Resize, ResizeBilinear, PixelShuffle, PixelUnshuffle, ConvTranspose, MaxPool, AvgPool, Pad, Slice, ChannelAffine
+};
 
 struct Step {
     Op op = Op::Add;
@@ -66,6 +69,8 @@ struct Step {
 
     float f0 = 0.f, f1 = 0.f;
     int i0 = 1, i1 = 1;
+    int i2 = 0, i3 = 0;
+    std::vector<float> aux, aux2;
 
     bool inplace = false;
     int inplaceArg = 0;
@@ -342,11 +347,197 @@ void runBinary(Op op, const float* a, const float* b, float* d, size_t n, int th
         forEachChunk(threads, n, [&](size_t lo, size_t hi) {
             for (size_t i = lo; i < hi; ++i) d[i] = a[i] + b[i];
         });
+    } else if (op == Op::Sub) {
+        forEachChunk(threads, n, [&](size_t lo, size_t hi) {
+            for (size_t i = lo; i < hi; ++i) d[i] = a[i] - b[i];
+        });
     } else {
         forEachChunk(threads, n, [&](size_t lo, size_t hi) {
             for (size_t i = lo; i < hi; ++i) d[i] = a[i] * b[i];
         });
     }
+}
+
+void runUnary2(const Step& st, const float* a, float* d, size_t n, int threads) {
+    switch (st.op) {
+        case Op::Tanh:
+            forEachChunk(threads, n, [&](size_t b, size_t e) {
+                for (size_t i = b; i < e; ++i) d[i] = std::tanh(a[i]);
+            });
+            break;
+        case Op::SiLU:
+            forEachChunk(threads, n, [&](size_t b, size_t e) {
+                for (size_t i = b; i < e; ++i) d[i] = a[i] / (1.f + std::exp(-a[i]));
+            });
+            break;
+        default:
+            break;
+    }
+}
+
+void runPerChannel(const Step& st, const float* a, float* d, int channels, size_t plane, int threads) {
+    parallelFor(threads, channels, [&](int c) {
+        const float* x = a + static_cast<size_t>(c) * plane;
+        float* y = d + static_cast<size_t>(c) * plane;
+        if (st.op == Op::PReLU) {
+            const float k = st.aux.size() == 1 ? st.aux[0] : st.aux[static_cast<size_t>(c)];
+            for (size_t i = 0; i < plane; ++i) y[i] = x[i] > 0.f ? x[i] : x[i] * k;
+        } else {
+            const float k = st.aux[static_cast<size_t>(c)], b = st.aux2[static_cast<size_t>(c)];
+            for (size_t i = 0; i < plane; ++i) y[i] = x[i] * k + b;
+        }
+    });
+}
+
+void runConvTranspose(const Step& st, const Buf& in, Buf& out, int threads) {
+    const int H = in.shape.h, W = in.shape.w;
+    const int Ho = out.shape.h, Wo = out.shape.w;
+    parallelFor(threads, st.outC * Ho, [&](int t) {
+        const int oc = t / Ho;
+        const int oy = t % Ho;
+        float* dst = out.mut + (static_cast<size_t>(oc) * Ho + oy) * Wo;
+        for (int x = 0; x < Wo; ++x) dst[x] = st.bias[oc];
+        for (int ky = 0; ky < st.kh; ++ky) {
+            const int ty = oy + st.ph - ky;
+            if (ty < 0 || ty % st.sh != 0) continue;
+            const int iy = ty / st.sh;
+            if (iy >= H) continue;
+            for (int ic = 0; ic < st.inC; ++ic) {
+                const float* src = in.data + (static_cast<size_t>(ic) * H + iy) * W;
+                const float* wk = st.weights.data() + (static_cast<size_t>(ic) * st.outC + oc) * st.kh * st.kw + static_cast<size_t>(ky) * st.kw;
+                for (int kx = 0; kx < st.kw; ++kx) {
+                    const float wv = wk[kx];
+                    int ix0 = 0;
+                    const int shift = kx - st.pw;
+                    if (shift < 0) ix0 = (-shift + st.sw - 1) / st.sw;
+                    for (int ix = ix0; ix < W; ++ix) {
+                        const int ox = ix * st.sw + shift;
+                        if (ox >= Wo) break;
+                        dst[ox] += wv * src[ix];
+                    }
+                }
+            }
+        }
+    });
+}
+
+void runPool(const Step& st, const Buf& in, Buf& out, int threads) {
+    const int C = in.shape.c, H = in.shape.h, W = in.shape.w;
+    const int Ho = out.shape.h, Wo = out.shape.w;
+    const bool isMax = st.op == Op::MaxPool;
+    parallelFor(threads, C * Ho, [&](int t) {
+        const int c = t / Ho;
+        const int oy = t % Ho;
+        const float* plane = in.data + static_cast<size_t>(c) * H * W;
+        float* dst = out.mut + (static_cast<size_t>(c) * Ho + oy) * Wo;
+        for (int ox = 0; ox < Wo; ++ox) {
+            float best = -std::numeric_limits<float>::infinity();
+            float sum = 0.f;
+            int count = 0;
+            for (int ky = 0; ky < st.kh; ++ky) {
+                const int iy = oy * st.sh - st.ph + ky;
+                for (int kx = 0; kx < st.kw; ++kx) {
+                    const int ix = ox * st.sw - st.pw + kx;
+                    if (iy < 0 || iy >= H || ix < 0 || ix >= W) continue;
+                    const float v = plane[static_cast<size_t>(iy) * W + ix];
+                    if (v > best) best = v;
+                    sum += v;
+                    ++count;
+                }
+            }
+            if (isMax) {
+                dst[ox] = best;
+            } else {
+                const int denom = st.i2 ? st.kh * st.kw : count;
+                dst[ox] = sum / static_cast<float>(denom > 0 ? denom : 1);
+            }
+        }
+    });
+}
+
+void runResizeBilinear(const Step& st, const Buf& in, Buf& out, int threads) {
+    const int C = in.shape.c, H = in.shape.h, W = in.shape.w;
+    const int Ho = out.shape.h, Wo = out.shape.w;
+    const bool align = st.i2 != 0;
+    auto coord = [&](int o, int outSize, int inSize, int scale) {
+        float src;
+        if (align) src = outSize > 1 ? static_cast<float>(o) * static_cast<float>(inSize - 1) / static_cast<float>(outSize - 1) : 0.f;
+        else src = (static_cast<float>(o) + 0.5f) / static_cast<float>(scale) - 0.5f;
+        return src < 0.f ? 0.f : src;
+    };
+    parallelFor(threads, C * Ho, [&](int t) {
+        const int c = t / Ho;
+        const int oy = t % Ho;
+        const float sy = coord(oy, Ho, H, st.i0);
+        int y0 = static_cast<int>(sy);
+        if (y0 > H - 1) y0 = H - 1;
+        const int y1 = y0 + 1 < H ? y0 + 1 : H - 1;
+        const float fy = sy - static_cast<float>(y0);
+        const float* r0 = in.data + (static_cast<size_t>(c) * H + y0) * W;
+        const float* r1 = in.data + (static_cast<size_t>(c) * H + y1) * W;
+        float* dst = out.mut + (static_cast<size_t>(c) * Ho + oy) * Wo;
+        for (int ox = 0; ox < Wo; ++ox) {
+            const float sx = coord(ox, Wo, W, st.i1);
+            int x0 = static_cast<int>(sx);
+            if (x0 > W - 1) x0 = W - 1;
+            const int x1 = x0 + 1 < W ? x0 + 1 : W - 1;
+            const float fx = sx - static_cast<float>(x0);
+            const float top = r0[x0] + (r0[x1] - r0[x0]) * fx;
+            const float bot = r1[x0] + (r1[x1] - r1[x0]) * fx;
+            dst[ox] = top + (bot - top) * fy;
+        }
+    });
+}
+
+inline int padIndex(int i, int n, int mode) {
+    if (i >= 0 && i < n) return i;
+    if (mode == 1) {
+        if (i < 0) i = -i;
+        if (i >= n) i = 2 * (n - 1) - i;
+        return i;
+    }
+    return i < 0 ? 0 : n - 1;
+}
+
+void runPad(const Step& st, const Buf& in, Buf& out, int threads) {
+    const int C = in.shape.c, H = in.shape.h, W = in.shape.w;
+    const int Ho = out.shape.h, Wo = out.shape.w;
+    const int top = st.ph, left = st.pw;
+    const int mode = st.i2;
+    parallelFor(threads, C * Ho, [&](int t) {
+        const int c = t / Ho;
+        const int oy = t % Ho;
+        float* dst = out.mut + (static_cast<size_t>(c) * Ho + oy) * Wo;
+        const int iy = oy - top;
+        if (mode == 0 && (iy < 0 || iy >= H)) {
+            for (int x = 0; x < Wo; ++x) dst[x] = st.f0;
+            return;
+        }
+        const float* src = in.data + (static_cast<size_t>(c) * H + padIndex(iy, H, mode)) * W;
+        for (int ox = 0; ox < Wo; ++ox) {
+            const int ix = ox - left;
+            dst[ox] = (mode == 0 && (ix < 0 || ix >= W)) ? st.f0 : src[padIndex(ix, W, mode)];
+        }
+    });
+}
+
+void runPixelUnshuffle(const Step& st, const Buf& in, Buf& out, int threads) {
+    const int r = st.i0;
+    const int H = in.shape.h, W = in.shape.w;
+    const int Co = out.shape.c, Ho = out.shape.h, Wo = out.shape.w;
+    parallelFor(threads, Co * Ho, [&](int t) {
+        const int oc = t / Ho;
+        const int y = t % Ho;
+        const int c = oc / (r * r), i = (oc / r) % r, j = oc % r;
+        const float* src = in.data + (static_cast<size_t>(c) * H + static_cast<size_t>(y) * r + i) * W + j;
+        float* dst = out.mut + (static_cast<size_t>(oc) * Ho + y) * Wo;
+        for (int x = 0; x < Wo; ++x) dst[x] = src[static_cast<size_t>(x) * r];
+    });
+}
+
+void runSlice(const Step& st, const Buf& in, Buf& out) {
+    const size_t plane = static_cast<size_t>(in.shape.h) * in.shape.w;
+    std::memcpy(out.mut, in.data + static_cast<size_t>(st.i0) * plane, static_cast<size_t>(out.shape.c) * plane * sizeof(float));
 }
 
 void runMulChannel(const float* full, const float* scale, float* d, int channels, size_t plane, int threads) {
@@ -447,6 +638,31 @@ bool attrFloat(const json::Value& attrs, const char* key, bool& present, float& 
     return true;
 }
 
+bool attrFlag(const json::Value& attrs, const char* key, bool def, bool& out, std::string* err, const std::string& where) {
+    out = def;
+    const json::Value* v = attrs.find(key);
+    if (!v) return true;
+    if (v->isBool()) {
+        out = v->boolean;
+        return true;
+    }
+    if (v->isNumber() && (v->number == 0.0 || v->number == 1.0)) {
+        out = v->number == 1.0;
+        return true;
+    }
+    return failMsg(err, where + ": attribute '" + key + "' must be true or false");
+}
+
+bool attrString(const json::Value& attrs, const char* key, const char* def, std::string& out, std::string* err,
+                const std::string& where) {
+    out = def;
+    const json::Value* v = attrs.find(key);
+    if (!v) return true;
+    if (!v->isString()) return failMsg(err, where + ": attribute '" + key + "' must be a string");
+    out = v->string;
+    return true;
+}
+
 bool loadConstant(const Model& model, const TensorInfo& t, std::vector<float>& out) {
     const size_t n = static_cast<size_t>(t.size / dtypeSize(t.dtype));
     out.resize(n);
@@ -471,6 +687,7 @@ struct Executor::Impl {
     int outputId = 0;
     int inC = 0, outC = 0, scale = 1;
     int fixedH = 0, fixedW = 0;
+    int inMultiple = 1;
     std::vector<int> lastUse;
     std::vector<int> defStep;
 
@@ -512,6 +729,12 @@ struct Executor::Impl {
                     }
                     break;
                 }
+                case Op::Sub: {
+                    const Shape& b = s[st.in[1]];
+                    if (a.c != b.c || a.h != b.h || a.w != b.w) return failMsg(err, st.label + ": operands have different shapes");
+                    o = a;
+                    break;
+                }
                 case Op::GlobalPool:
                     o.c = a.c;
                     o.h = 1;
@@ -521,10 +744,80 @@ struct Executor::Impl {
                 case Op::LeakyReLU:
                 case Op::ReLU:
                 case Op::Sigmoid:
+                case Op::Tanh:
+                case Op::SiLU:
                 case Op::Clip:
                 case Op::Hardswish:
                 case Op::Hardsigmoid:
                     o = a;
+                    break;
+                case Op::PReLU:
+                case Op::ChannelAffine:
+                    if (st.aux.size() != 1 && static_cast<int>(st.aux.size()) != a.c) {
+                        return failMsg(err, st.label + ": parameter length does not match the channel count " + std::to_string(a.c));
+                    }
+                    if (st.op == Op::ChannelAffine && (static_cast<int>(st.aux.size()) != a.c || st.aux2.size() != st.aux.size())) {
+                        return failMsg(err, st.label + ": scale and shift must have one value per channel (" + std::to_string(a.c) + ")");
+                    }
+                    o = a;
+                    break;
+                case Op::ConvTranspose: {
+                    if (a.c != st.inC) {
+                        return failMsg(err, st.label + ": expects " + std::to_string(st.inC) + " input channels but receives " +
+                                                std::to_string(a.c));
+                    }
+                    const int64_t hh = (static_cast<int64_t>(a.h) - 1) * st.sh - 2LL * st.ph + st.kh + st.i2;
+                    const int64_t ww = (static_cast<int64_t>(a.w) - 1) * st.sw - 2LL * st.pw + st.kw + st.i3;
+                    if (hh < 1 || ww < 1 || hh > (1 << 28) || ww > (1 << 28)) return failMsg(err, st.label + ": invalid output size");
+                    o.c = st.outC;
+                    o.h = static_cast<int>(hh);
+                    o.w = static_cast<int>(ww);
+                    break;
+                }
+                case Op::MaxPool:
+                case Op::AvgPool: {
+                    const int64_t hh = static_cast<int64_t>(a.h) + 2LL * st.ph - st.kh;
+                    const int64_t ww = static_cast<int64_t>(a.w) + 2LL * st.pw - st.kw;
+                    if (hh < 0 || ww < 0) return failMsg(err, st.label + ": input is smaller than the pooling window");
+                    o.c = a.c;
+                    o.h = static_cast<int>(hh / st.sh + 1);
+                    o.w = static_cast<int>(ww / st.sw + 1);
+                    break;
+                }
+                case Op::ResizeBilinear: {
+                    const int64_t hh = static_cast<int64_t>(a.h) * st.i0;
+                    const int64_t ww = static_cast<int64_t>(a.w) * st.i1;
+                    if (hh > (1 << 28) || ww > (1 << 28)) return failMsg(err, st.label + ": output tensor is too large");
+                    o.c = a.c;
+                    o.h = static_cast<int>(hh);
+                    o.w = static_cast<int>(ww);
+                    break;
+                }
+                case Op::Pad: {
+                    const int64_t hh = static_cast<int64_t>(a.h) + st.ph + st.i3;
+                    const int64_t ww = static_cast<int64_t>(a.w) + st.pw + st.sw;
+                    if (st.i2 == 1 && (st.ph >= a.h || st.i3 >= a.h || st.pw >= a.w || st.sw >= a.w)) {
+                        return failMsg(err, st.label + ": reflect padding must be smaller than the input size");
+                    }
+                    if (hh > (1 << 28) || ww > (1 << 28)) return failMsg(err, st.label + ": output tensor is too large");
+                    o.c = a.c;
+                    o.h = static_cast<int>(hh);
+                    o.w = static_cast<int>(ww);
+                    break;
+                }
+                case Op::PixelUnshuffle: {
+                    if (a.h % st.i0 != 0 || a.w % st.i0 != 0) {
+                        return failMsg(err, st.label + ": the input size must be a multiple of " + std::to_string(st.i0));
+                    }
+                    o.c = a.c * st.i0 * st.i0;
+                    o.h = a.h / st.i0;
+                    o.w = a.w / st.i0;
+                    break;
+                }
+                case Op::Slice:
+                    if (st.i1 > a.c) return failMsg(err, st.label + ": channel range is outside the input");
+                    o = a;
+                    o.c = st.i1 - st.i0;
                     break;
                 case Op::Concat: {
                     o = a;
@@ -577,6 +870,7 @@ int Executor::outChannels() const { return impl_->outC; }
 int Executor::scale() const { return impl_->scale; }
 int Executor::fixedInputHeight() const { return impl_->fixedH; }
 int Executor::fixedInputWidth() const { return impl_->fixedW; }
+int Executor::inputMultiple() const { return impl_->inMultiple; }
 
 bool Executor::outputShape(int h, int w, Shape* out) const {
     Shape in;
@@ -816,6 +1110,209 @@ std::unique_ptr<Executor> Executor::create(const Model& model, std::string* erro
                 return nullptr;
             }
             if (!attrInt(n.attrs, "upscale", 1, 1, 64, st.i0, error, where)) return nullptr;
+        } else if (n.op == "Sub") {
+            int a = 0, b = 0;
+            if (n.inputs.size() != 2 || !valueOf(n.inputs[0], a) || !valueOf(n.inputs[1], b)) {
+                failMsg(error, where + ": expects two activation inputs");
+                return nullptr;
+            }
+            st.op = Op::Sub;
+            st.in = {a, b};
+        } else if (n.op == "Tanh" || n.op == "SiLU") {
+            int a = 0;
+            if (n.inputs.size() != 1 || !valueOf(n.inputs[0], a)) {
+                failMsg(error, where + ": expects exactly one activation input");
+                return nullptr;
+            }
+            st.in = {a};
+            st.op = n.op == "Tanh" ? Op::Tanh : Op::SiLU;
+        } else if (n.op == "PReLU" || n.op == "ChannelAffine") {
+            const bool affine = n.op == "ChannelAffine";
+            int a = 0;
+            if (n.inputs.size() != (affine ? 3u : 2u) || !valueOf(n.inputs[0], a)) {
+                failMsg(error, where + (affine ? ": expects inputs x, scale, shift" : ": expects inputs x, slope"));
+                return nullptr;
+            }
+            st.in = {a};
+            auto p1 = constants.find(n.inputs[1]);
+            if (p1 == constants.end()) {
+                failMsg(error, where + ": '" + n.inputs[1] + "' must be a constant tensor");
+                return nullptr;
+            }
+            loadConstant(model, *p1->second, st.aux);
+            if (affine) {
+                auto p2 = constants.find(n.inputs[2]);
+                if (p2 == constants.end()) {
+                    failMsg(error, where + ": '" + n.inputs[2] + "' must be a constant tensor");
+                    return nullptr;
+                }
+                loadConstant(model, *p2->second, st.aux2);
+            }
+            st.op = affine ? Op::ChannelAffine : Op::PReLU;
+        } else if (n.op == "PixelUnshuffle") {
+            int a = 0;
+            if (n.inputs.size() != 1 || !valueOf(n.inputs[0], a)) {
+                failMsg(error, where + ": expects exactly one activation input");
+                return nullptr;
+            }
+            st.in = {a};
+            if (!n.attrs.find("downscale")) {
+                failMsg(error, where + ": missing attribute 'downscale'");
+                return nullptr;
+            }
+            if (!attrInt(n.attrs, "downscale", 1, 1, 16, st.i0, error, where)) return nullptr;
+            st.op = Op::PixelUnshuffle;
+        } else if (n.op == "ConvTranspose2D") {
+            if (n.inputs.size() < 2 || n.inputs.size() > 3) {
+                failMsg(error, where + ": expects inputs x, weight[, bias]");
+                return nullptr;
+            }
+            int x = 0;
+            if (!valueOf(n.inputs[0], x)) {
+                failMsg(error, where + ": input '" + n.inputs[0] + "' is not an activation");
+                return nullptr;
+            }
+            st.in = {x};
+            auto wIt = constants.find(n.inputs[1]);
+            if (wIt == constants.end() || wIt->second->shape.size() != 4) {
+                failMsg(error, where + ": weight '" + n.inputs[1] + "' must be a constant tensor [I, O, kh, kw]");
+                return nullptr;
+            }
+            const TensorInfo& wt = *wIt->second;
+            int g = 1;
+            if (!attrInt(n.attrs, "groups", 1, 1, 1, g, error, where)) return nullptr;
+            if (!attrPair(n.attrs, "stride", 1, 1, 1, 1 << 8, st.sh, st.sw, error, where) ||
+                !attrPair(n.attrs, "padding", 0, 0, 0, 1 << 8, st.ph, st.pw, error, where) ||
+                !attrPair(n.attrs, "output_padding", 0, 0, 0, 1 << 8, st.i2, st.i3, error, where)) {
+                return nullptr;
+            }
+            if (st.i2 >= st.sh || st.i3 >= st.sw) {
+                if (st.i2 != 0 || st.i3 != 0) {
+                    failMsg(error, where + ": output_padding must be smaller than the stride");
+                    return nullptr;
+                }
+            }
+            st.inC = static_cast<int>(wt.shape[0]);
+            st.outC = static_cast<int>(wt.shape[1]);
+            st.kh = static_cast<int>(wt.shape[2]);
+            st.kw = static_cast<int>(wt.shape[3]);
+            if (st.inC < 1 || st.outC < 1 || st.kh < 1 || st.kw < 1 || st.kh > 64 || st.kw > 64 || st.inC > (1 << 20) || st.outC > (1 << 20)) {
+                failMsg(error, where + ": unsupported weight shape");
+                return nullptr;
+            }
+            loadConstant(model, wt, st.weights);
+            if (n.inputs.size() == 3) {
+                auto bIt = constants.find(n.inputs[2]);
+                if (bIt == constants.end() || bIt->second->shape.size() != 1 || bIt->second->shape[0] != st.outC) {
+                    failMsg(error, where + ": bias '" + n.inputs[2] + "' must be a constant tensor [O]");
+                    return nullptr;
+                }
+                loadConstant(model, *bIt->second, st.bias);
+            } else {
+                st.bias.assign(static_cast<size_t>(st.outC), 0.f);
+            }
+            st.op = Op::ConvTranspose;
+        } else if (n.op == "MaxPool2D" || n.op == "AvgPool2D") {
+            int a = 0;
+            if (n.inputs.size() != 1 || !valueOf(n.inputs[0], a)) {
+                failMsg(error, where + ": expects exactly one activation input");
+                return nullptr;
+            }
+            st.in = {a};
+            if (!n.attrs.find("kernel")) {
+                failMsg(error, where + ": missing attribute 'kernel'");
+                return nullptr;
+            }
+            if (!attrPair(n.attrs, "kernel", 1, 1, 1, 1 << 8, st.kh, st.kw, error, where)) return nullptr;
+            st.sh = st.kh;
+            st.sw = st.kw;
+            if (!attrPair(n.attrs, "stride", st.kh, st.kw, 1, 1 << 8, st.sh, st.sw, error, where) ||
+                !attrPair(n.attrs, "padding", 0, 0, 0, 1 << 8, st.ph, st.pw, error, where)) {
+                return nullptr;
+            }
+            if (st.ph * 2 > st.kh || st.pw * 2 > st.kw) {
+                failMsg(error, where + ": padding must be at most half of the window");
+                return nullptr;
+            }
+            bool inc = false;
+            if (!attrFlag(n.attrs, "count_include_pad", false, inc, error, where)) return nullptr;
+            st.i2 = inc ? 1 : 0;
+            st.op = n.op == "MaxPool2D" ? Op::MaxPool : Op::AvgPool;
+        } else if (n.op == "ResizeBilinear") {
+            int a = 0;
+            if (n.inputs.size() != 1 || !valueOf(n.inputs[0], a)) {
+                failMsg(error, where + ": expects exactly one activation input");
+                return nullptr;
+            }
+            st.in = {a};
+            if (!n.attrs.find("scale")) {
+                failMsg(error, where + ": missing attribute 'scale'");
+                return nullptr;
+            }
+            if (!attrPair(n.attrs, "scale", 1, 1, 1, 64, st.i0, st.i1, error, where)) return nullptr;
+            bool align = false;
+            if (!attrFlag(n.attrs, "align_corners", false, align, error, where)) return nullptr;
+            st.i2 = align ? 1 : 0;
+            st.op = Op::ResizeBilinear;
+        } else if (n.op == "Pad") {
+            int a = 0;
+            if (n.inputs.size() != 1 || !valueOf(n.inputs[0], a)) {
+                failMsg(error, where + ": expects exactly one activation input");
+                return nullptr;
+            }
+            st.in = {a};
+            const json::Value* pv = n.attrs.find("pads");
+            if (!pv || !pv->isArray() || pv->array.size() != 4) {
+                failMsg(error, where + ": attribute 'pads' must be [top, left, bottom, right]");
+                return nullptr;
+            }
+            int pads[4];
+            for (int i = 0; i < 4; ++i) {
+                const json::Value& e = pv->array[static_cast<size_t>(i)];
+                if (!e.isNumber() || std::floor(e.number) != e.number || e.number < 0 || e.number > (1 << 12)) {
+                    failMsg(error, where + ": padding values must be integers in 0..4096");
+                    return nullptr;
+                }
+                pads[i] = static_cast<int>(e.number);
+            }
+            st.ph = pads[0];
+            st.pw = pads[1];
+            st.i3 = pads[2];
+            st.sw = pads[3];
+            std::string mode;
+            if (!attrString(n.attrs, "mode", "constant", mode, error, where)) return nullptr;
+            if (mode == "constant") st.i2 = 0;
+            else if (mode == "reflect") st.i2 = 1;
+            else if (mode == "replicate") st.i2 = 2;
+            else {
+                failMsg(error, where + ": mode must be 'constant', 'reflect' or 'replicate'");
+                return nullptr;
+            }
+            bool present = false;
+            float v = 0.f;
+            if (!attrFloat(n.attrs, "value", present, v, error, where)) return nullptr;
+            st.f0 = present ? v : 0.f;
+            st.op = Op::Pad;
+        } else if (n.op == "Slice") {
+            int a = 0;
+            if (n.inputs.size() != 1 || !valueOf(n.inputs[0], a)) {
+                failMsg(error, where + ": expects exactly one activation input");
+                return nullptr;
+            }
+            st.in = {a};
+            if (!n.attrs.find("start") || !n.attrs.find("end")) {
+                failMsg(error, where + ": attributes 'start' and 'end' (channel range) are required");
+                return nullptr;
+            }
+            if (!attrInt(n.attrs, "start", 0, 0, 1 << 20, st.i0, error, where) ||
+                !attrInt(n.attrs, "end", 1, 1, 1 << 20, st.i1, error, where)) {
+                return nullptr;
+            }
+            if (st.i0 >= st.i1) {
+                failMsg(error, where + ": start must be smaller than end");
+                return nullptr;
+            }
+            st.op = Op::Slice;
         } else {
             failMsg(error, "unsupported operator '" + n.op + "' (" + where + ")");
             return nullptr;
@@ -827,6 +1324,9 @@ std::unique_ptr<Executor> Executor::create(const Model& model, std::string* erro
         im.steps.push_back(std::move(st));
     }
     im.numValues = next;
+    for (const Step& st : im.steps) {
+        if (st.op == Op::PixelUnshuffle && st.in[0] == 0) im.inMultiple *= st.i0;
+    }
 
     auto outIt = ids.find(output.name);
     if (outIt == ids.end()) {
@@ -848,9 +1348,10 @@ std::unique_ptr<Executor> Executor::create(const Model& model, std::string* erro
     }
     for (int i = 0; i < numSteps; ++i) {
         Step& st = im.steps[i];
-        const bool elementwise = st.op == Op::Add || st.op == Op::MulScalar || st.op == Op::LeakyReLU ||
-                                 st.op == Op::ReLU || st.op == Op::Sigmoid || st.op == Op::Clip ||
-                                 st.op == Op::Hardswish || st.op == Op::Hardsigmoid;
+        const bool elementwise = st.op == Op::Add || st.op == Op::Sub || st.op == Op::MulScalar || st.op == Op::LeakyReLU ||
+                                 st.op == Op::ReLU || st.op == Op::PReLU || st.op == Op::Sigmoid || st.op == Op::Tanh ||
+                                 st.op == Op::SiLU || st.op == Op::Clip || st.op == Op::Hardswish ||
+                                 st.op == Op::Hardsigmoid || st.op == Op::ChannelAffine;
         if (elementwise) {
             for (size_t k = 0; k < st.in.size(); ++k) {
                 const int v = st.in[k];
@@ -1005,6 +1506,7 @@ Executor::Status Executor::run(const float* in, int h, int w, float* out, int th
                     break;
                 }
                 case Op::Add:
+                case Op::Sub:
                     runBinary(st.op, inData(0), inData(1), dst.mut, n, threads);
                     break;
                 case Op::Mul: {
@@ -1032,6 +1534,30 @@ Executor::Status Executor::run(const float* in, int h, int w, float* out, int th
                 case Op::Hardsigmoid:
                     runUnary(st, inData(0), dst.mut, n, threads);
                     break;
+                case Op::Tanh:
+                case Op::SiLU:
+                    runUnary2(st, inData(0), dst.mut, n, threads);
+                    break;
+                case Op::PReLU:
+                case Op::ChannelAffine:
+                    runPerChannel(st, inData(0), dst.mut, os.c, static_cast<size_t>(os.h) * os.w, threads);
+                    break;
+                case Op::ConvTranspose:
+                    runConvTranspose(st, vals[st.in[0]], dst, threads);
+                    break;
+                case Op::MaxPool:
+                case Op::AvgPool:
+                    runPool(st, vals[st.in[0]], dst, threads);
+                    break;
+                case Op::ResizeBilinear:
+                    runResizeBilinear(st, vals[st.in[0]], dst, threads);
+                    break;
+                case Op::Pad:
+                    runPad(st, vals[st.in[0]], dst, threads);
+                    break;
+                case Op::Slice:
+                    runSlice(st, vals[st.in[0]], dst);
+                    break;
                 case Op::Concat: {
                     size_t offset = 0;
                     for (int id : st.in) {
@@ -1047,6 +1573,9 @@ Executor::Status Executor::run(const float* in, int h, int w, float* out, int th
                     break;
                 case Op::PixelShuffle:
                     runPixelShuffle(st, vals[st.in[0]], dst, threads);
+                    break;
+                case Op::PixelUnshuffle:
+                    runPixelUnshuffle(st, vals[st.in[0]], dst, threads);
                     break;
             }
 

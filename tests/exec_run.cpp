@@ -16,7 +16,7 @@ int main(int argc, char** argv) {
         std::printf("LOAD_ERROR: %s\n", err.c_str());
         return 1;
     }
-    std::unique_ptr<vva::Executor> exec = vva::Executor::create(*model, &err, model->task() == "classify");
+    std::unique_ptr<vva::Executor> exec = vva::Executor::create(*model, &err, model->task() == "classify" || std::getenv("VVA_ANY_OUTPUT") != nullptr);
     if (!exec) {
         std::printf("PREPARE_ERROR: %s\n", err.c_str());
         return 1;

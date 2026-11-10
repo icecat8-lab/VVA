@@ -3,7 +3,8 @@ import os
 import numpy as np
 
 from .fileformat import VVAFormatError, VVAWriter, read_vva
-from .reference import MBV3_SMALL, mobilenetv3_small_forward, rrdbnet_forward, run_graph
+from .reference import (MBV3_SMALL, conv2d, mobilenetv3_small_forward, pixel_shuffle, resize_nearest, rrdbnet_forward,
+                        run_graph)
 
 _FP16_MAX = 65000.0
 _WRAPPER_KEYS = ("params_ema", "params", "state_dict", "model", "net_g", "g_ema")
@@ -71,12 +72,42 @@ def _need(sd, key, shape_check=None):
 def _conv_shape(out_c, in_c):
     return lambda s: len(s) == 4 and s[0] == out_c and s[1] == in_c and s[2] == s[3] and s[2] % 2 == 1
 
+_UNSHUFFLE_FOR_CHANNELS = {3: 1, 12: 2, 48: 4}
+
+def rrdbnet_unshuffle(sd):
+    return _UNSHUFFLE_FOR_CHANNELS[sd["conv_first.weight"].shape[1]]
+
+def remap_old_esrgan(sd):
+    if "model.0.weight" not in sd or not any(k.startswith("model.1.sub.") for k in sd):
+        return sd
+    nb = 0
+    while "model.1.sub.%d.RDB1.conv1.0.weight" % nb in sd:
+        nb += 1
+    if nb == 0:
+        return sd
+    out = {}
+    fixed = {"model.0": "conv_first", "model.1.sub.%d" % nb: "conv_body", "model.3": "conv_up1", "model.6": "conv_up2",
+             "model.8": "conv_hr", "model.10": "conv_last"}
+    for key, value in sd.items():
+        new = None
+        for old, name in fixed.items():
+            if key in (old + ".weight", old + ".bias"):
+                new = name + key[len(old):]
+        if new is None and key.startswith("model.1.sub."):
+            parts = key.split(".")
+            if len(parts) == 8 and parts[3].startswith("RDB") is False and parts[4].startswith("RDB"):
+                _, _, _, i, rdb, conv, zero, kind = parts
+                if zero == "0" and conv.startswith("conv") and kind in ("weight", "bias"):
+                    new = "body.%s.rdb%s.%s.%s" % (i, rdb[3:], conv, kind)
+        out[new or key] = value
+    return out
+
 def inspect_rrdbnet(sd):
     first = _need(sd, "conv_first.weight", lambda s: len(s) == 4 and s[2] == s[3] and s[2] % 2 == 1)
     nf, in_ch = first.shape[0], first.shape[1]
-    if in_ch != 3:
-        raise ConversionError("conv_first expects %d input channels; only RGB x4 models (3 channels, no "
-                              "pixel-unshuffle) are supported" % in_ch)
+    if in_ch not in _UNSHUFFLE_FOR_CHANNELS:
+        raise ConversionError("conv_first expects %d input channels; RRDBNet models with 3 (x4), 12 (x2) or 48 (x1) "
+                              "input channels are supported" % in_ch)
     nb = 0
     while "body.%d.rdb1.conv1.weight" % nb in sd:
         nb += 1
@@ -99,8 +130,10 @@ def inspect_rrdbnet(sd):
 
 def build_rrdbnet(sd, name="model", fp16=True, lrelu_slope=0.2, res_scale=0.2, author="", license=""):
     nf, gc, nb = inspect_rrdbnet(sd)
-    writer = VVAWriter(name=name, scale=4, author=author, license=license,
-                       description="RRDBNet x4 (nf=%d, gc=%d, nb=%d)" % (nf, gc, nb))
+    factor = rrdbnet_unshuffle(sd)
+    net_scale = 4 // factor
+    writer = VVAWriter(name=name, scale=net_scale, author=author, license=license,
+                       description="RRDBNet x%d (nf=%d, gc=%d, nb=%d)" % (net_scale, nf, gc, nb))
     writer.add_input("input", [1, 3, -1, -1])
     used = set()
 
@@ -155,7 +188,11 @@ def build_rrdbnet(sd, name="model", fp16=True, lrelu_slope=0.2, res_scale=0.2, a
         x5 = conv(p + ".conv5", concat([x, x1, x2, x3, x4], p + ".c5"))
         return add(scale(x5, p), x, p)
 
-    feat0 = conv("conv_first", "input")
+    source = "input"
+    if factor > 1:
+        source = "input.unshuffle"
+        writer.add_node("PixelUnshuffle", ["input"], [source], {"downscale": factor})
+    feat0 = conv("conv_first", source)
     t = feat0
     for i in range(nb):
         o = rdb("body.%d.rdb1" % i, t)
@@ -176,6 +213,8 @@ def build_rrdbnet(sd, name="model", fp16=True, lrelu_slope=0.2, res_scale=0.2, a
     return writer
 
 def verify_file(path, sd, lrelu_slope=0.2, res_scale=0.2, size=(10, 13), seed=0):
+    factor = rrdbnet_unshuffle(sd)
+    size = (size[0] // 4 * 4 + 4, size[1] // 4 * 4 + 4) if factor > 1 else size
     meta, stored = read_vva(path)
     x = np.random.RandomState(seed).rand(3, size[0], size[1])
     got = run_graph(meta, stored, x)
@@ -186,6 +225,112 @@ def verify_file(path, sd, lrelu_slope=0.2, res_scale=0.2, size=(10, 13), seed=0)
     span = max(float(np.max(np.abs(want_original))), 1e-12)
     return (float(np.max(np.abs(got - want_same_weights))) / span,
             float(np.max(np.abs(got - want_original))) / span)
+
+def inspect_srvgg(sd):
+    layers = []
+    i = 0
+    while "body.%d.weight" % i in sd:
+        w = sd["body.%d.weight" % i]
+        layers.append(("conv" if w.ndim == 4 else "act" if w.ndim == 1 else "?", i))
+        i += 1
+    stray = [k for k in sd if k.startswith("body.") and k.endswith(".weight") and k.split(".")[1].isdigit()
+             and int(k.split(".")[1]) >= len(layers)]
+    if stray:
+        raise ConversionError("body.%d.weight is missing: the layers must be numbered consecutively (conv, PReLU, "
+                              "conv, PReLU, ..., conv). Only the PReLU variant of SRVGGNetCompact is supported"
+                              % len(layers))
+    if len(layers) < 3 or any(kind == "?" for kind, _ in layers):
+        raise ConversionError("this does not look like a Real-ESRGAN SRVGGNetCompact checkpoint (body.N weights)")
+    kinds = [k for k, _ in layers]
+    for pos, kind in enumerate(kinds):
+        if kind != ("conv" if pos % 2 == 0 else "act"):
+            raise ConversionError("unexpected layer order in 'body': expected conv, PReLU, conv, PReLU, ..., conv. "
+                                  "Only the PReLU variant (all released Real-ESRGAN compact models) is supported")
+    if kinds[-1] != "conv":
+        raise ConversionError("the last layer of 'body' must be a convolution")
+    first = sd["body.0.weight"]
+    nf, in_ch = first.shape[0], first.shape[1]
+    if in_ch != 3:
+        raise ConversionError("only RGB (3-channel) SRVGGNetCompact models are supported")
+    prev = nf
+    for pos, (kind, idx) in enumerate(layers):
+        w = sd["body.%d.weight" % idx]
+        if kind == "conv":
+            if w.shape[2] != w.shape[3] or w.shape[2] % 2 != 1:
+                raise ConversionError("body.%d has an unsupported kernel shape %s" % (idx, tuple(w.shape)))
+            if pos > 0 and w.shape[1] != nf:
+                raise ConversionError("body.%d expects %d input channels but the network width is %d" % (idx, w.shape[1], nf))
+            _need(sd, "body.%d.bias" % idx, lambda s, o=w.shape[0]: s == (o,))
+            prev = w.shape[0]
+        elif w.shape not in ((prev,), (1,)):
+            raise ConversionError("body.%d (PReLU) has %d values but the previous layer has %d channels" % (idx, w.size, prev))
+    out_ch = sd["body.%d.weight" % layers[-1][1]].shape[0]
+    up = int(round((out_ch / 3.0) ** 0.5))
+    if out_ch % 3 or up * up * 3 != out_ch or up < 1 or up > 16:
+        raise ConversionError("the last convolution has %d output channels, which is not 3 x upscale^2" % out_ch)
+    return nf, (len(layers) - 1) // 2, up
+
+def build_srvgg(sd, name="model", fp16=True, author="", license=""):
+    nf, nconv, up = inspect_srvgg(sd)
+    writer = VVAWriter(name=name, scale=up, author=author, license=license,
+                       description="SRVGGNetCompact x%d (nf=%d, nc=%d)" % (up, nf, nconv - 1))
+    writer.add_input("input", [1, 3, -1, -1])
+    used = set()
+    total = 2 * nconv + 1
+
+    def store(key, as_weight):
+        arr = sd[key]
+        if not np.all(np.isfinite(arr)):
+            raise ConversionError("weight '%s' contains NaN or Inf" % key)
+        dtype = "f16" if (fp16 and as_weight and float(np.max(np.abs(arr))) <= _FP16_MAX) else "f32"
+        writer.add_tensor(key, arr, dtype)
+        used.add(key)
+        return key
+
+    x = "input"
+    for i in range(total):
+        key = "body.%d" % i
+        out = "%s#out" % key
+        if i % 2 == 0:
+            k = sd[key + ".weight"].shape[2]
+            writer.add_node("Conv2D", [x, store(key + ".weight", True), store(key + ".bias", False)], [out],
+                            {"stride": [1, 1], "padding": [k // 2, k // 2], "dilation": [1, 1], "groups": 1}, name=key)
+        else:
+            writer.add_node("PReLU", [x, store(key + ".weight", False)], [out], name=key)
+        x = out
+    if up > 1:
+        writer.add_node("PixelShuffle", [x], ["shuffled"], {"upscale": up})
+        writer.add_node("ResizeNearest", ["input"], ["base"], {"scale": [up, up]})
+        writer.add_node("Add", ["shuffled", "base"], ["output"])
+    else:
+        writer.add_node("Add", [x, "input"], ["output"])
+    writer.add_output("output", [1, 3, -1, -1])
+    writer.unused_keys = sorted(k for k in sd if k not in used)
+    return writer
+
+def srvgg_forward(sd, x):
+    nf, nconv, up = inspect_srvgg(sd)
+    t = np.asarray(x, dtype=np.float64)
+    for i in range(2 * nconv + 1):
+        if i % 2 == 0:
+            w = sd["body.%d.weight" % i]
+            t = conv2d(t, w, sd["body.%d.bias" % i], padding=(w.shape[2] // 2, w.shape[2] // 2))
+        else:
+            slope = np.asarray(sd["body.%d.weight" % i], dtype=np.float64).reshape(-1, 1, 1)
+            t = np.where(t > 0, t, t * slope)
+    if up > 1:
+        return pixel_shuffle(t, up) + resize_nearest(np.asarray(x, dtype=np.float64), up, up)
+    return t + np.asarray(x, dtype=np.float64)
+
+def verify_srvgg(path, sd, size=(10, 13), seed=0):
+    meta, stored = read_vva(path)
+    x = np.random.RandomState(seed).rand(3, size[0], size[1])
+    got = run_graph(meta, stored, x)
+    deq = {k: np.asarray(v, dtype=np.float64) for k, v in stored.items()}
+    want_same = srvgg_forward(deq, x)
+    want_orig = srvgg_forward({k: np.asarray(v, dtype=np.float64) for k, v in sd.items()}, x)
+    span = max(float(np.max(np.abs(want_orig))), 1e-12)
+    return float(np.max(np.abs(got - want_same))) / span, float(np.max(np.abs(got - want_orig))) / span
 
 def _make_divisible(v, divisor=8):
     new_v = max(divisor, int(v + divisor / 2) // divisor * divisor)
@@ -332,20 +477,46 @@ def verify_mobilenetv3(path, sd, bn_eps=1e-3, size=64, seed=0):
 def detect_architecture(sd):
     if "conv_first.weight" in sd and any(k.startswith("body.") for k in sd):
         return "rrdbnet"
+    if "body.0.weight" in sd and "body.1.weight" in sd and sd["body.0.weight"].ndim == 4 and sd["body.1.weight"].ndim == 1:
+        return "srvgg"
     if "features.0.0.weight" in sd and "classifier.3.weight" in sd:
         return "mobilenet_v3_small"
-    raise ConversionError("unrecognised checkpoint: supported networks are the x4 RRDBNet (basicsr / Real-ESRGAN "
-                          "keys: conv_first, body.N.rdb1...) and torchvision MobileNetV3-Small classifiers "
-                          "(keys: features.N.block..., classifier.3)")
+    raise ConversionError("unrecognised checkpoint: supported .pth networks are RRDBNet x1/x2/x4 (basicsr / "
+                          "Real-ESRGAN keys: conv_first, body.N.rdb1..., or the old ESRGAN keys model.1.sub...), "
+                          "SRVGGNetCompact (Real-ESRGAN general/anime video models: body.N) and torchvision "
+                          "MobileNetV3-Small classifiers. Any other image network can be exported to ONNX and "
+                          "converted from the .onnx file")
 
 def convert(input_path, output_path, fp16=True, name=None, author="", license="", lrelu_slope=0.2,
             res_scale=0.2, verify=True, allow_pickle=False, log=print, classes=None, input_size=224,
             mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), bn_eps=1e-3):
-    sd = load_checkpoint(input_path, allow_pickle=allow_pickle)
+    if str(input_path).lower().endswith(".onnx"):
+        from .onnx_import import convert_onnx
+        return convert_onnx(input_path, output_path, fp16=fp16, name=name, author=author, license=license,
+                            verify=verify, log=log)
+    sd = remap_old_esrgan(load_checkpoint(input_path, allow_pickle=allow_pickle))
     name = name or os.path.splitext(os.path.basename(output_path))[0]
-    if detect_architecture(sd) == "mobilenet_v3_small":
+    arch = detect_architecture(sd)
+    if arch == "mobilenet_v3_small":
         return _convert_classifier(sd, output_path, fp16, name, author, license, verify, log, classes, input_size,
                                    mean, std, bn_eps)
+    if arch == "srvgg":
+        writer = build_srvgg(sd, name, fp16, author, license)
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        try:
+            size = writer.save(output_path)
+        except VVAFormatError as exc:
+            raise ConversionError(str(exc))
+        nf, nconv, up = inspect_srvgg(sd)
+        log("converted: %s  (SRVGGNetCompact x%d nf=%d nc=%d, %.1f MB)" % (output_path, up, nf, nconv - 1, size / 1e6))
+        if writer.unused_keys:
+            log("note: %d checkpoint entries were not used (e.g. %s)" % (len(writer.unused_keys), writer.unused_keys[0]))
+        if verify:
+            graph_err, quant_err = verify_srvgg(output_path, sd)
+            if graph_err > 1e-6:
+                raise ConversionError("verification failed: the stored graph differs from the network (%.2e)" % graph_err)
+            log("verified: graph matches the network (%.1e), fp16 storage error %.1e of the output range" % (graph_err, quant_err))
+        return output_path
     writer = build_rrdbnet(sd, name, fp16, lrelu_slope, res_scale, author, license)
     out_dir = os.path.dirname(os.path.abspath(output_path))
     os.makedirs(out_dir, exist_ok=True)
@@ -354,7 +525,7 @@ def convert(input_path, output_path, fp16=True, name=None, author="", license=""
     except VVAFormatError as exc:
         raise ConversionError(str(exc))
     nf, gc, nb = inspect_rrdbnet(sd)
-    log("converted: %s  (x4 RRDBNet nf=%d gc=%d nb=%d, %.1f MB)" % (output_path, nf, gc, nb, size / 1e6))
+    log("converted: %s  (x%d RRDBNet nf=%d gc=%d nb=%d, %.1f MB)" % (output_path, 4 // rrdbnet_unshuffle(sd), nf, gc, nb, size / 1e6))
     if writer.unused_keys:
         log("note: %d checkpoint entries were not used (e.g. %s)" % (len(writer.unused_keys), writer.unused_keys[0]))
     if verify:

@@ -37,6 +37,7 @@ public:
 
     int fixedInputHeight() const;
     int fixedInputWidth() const;
+    int inputMultiple() const;
 
     bool outputShape(int h, int w, Shape* out) const;
 

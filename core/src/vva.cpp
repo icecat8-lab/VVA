@@ -576,7 +576,10 @@ public:
     int chooseTile(int w, int h, int pad, bool useGpu) const {
         const size_t budget = budgetBytes();
         const int longest = std::max(w, h);
+        const int mult = std::max(1, exec->inputMultiple());
         auto fitsBudget = [&](int ph, int pw) {
+            ph = (ph + mult - 1) / mult * mult;
+            pw = (pw + mult - 1) / mult * mult;
             if (useGpu) {
                 const size_t bytes = gpuBackend->estimateBytes(ph, pw);
                 return bytes > 0 && bytes <= budget;
@@ -639,7 +642,9 @@ public:
         const int nthreads = effectiveThreads();
         const int outW = w * s;
 
-        const size_t inTileFloats = static_cast<size_t>(3) * regionW * regionH;
+        const int mult = std::max(1, exec->inputMultiple());
+        auto roundUp = [mult](int v) { return (v + mult - 1) / mult * mult; };
+        const size_t inTileFloats = static_cast<size_t>(3) * roundUp(regionW) * roundUp(regionH);
         const size_t outTileFloats = inTileFloats * static_cast<size_t>(s) * s;
         std::unique_ptr<float[]> tileIn(new (std::nothrow) float[inTileFloats]);
         std::unique_ptr<float[]> tileOut(new (std::nothrow) float[outTileFloats]);
@@ -657,23 +662,37 @@ public:
                 const int ry0 = std::max(0, y0 - pad), ry1 = std::min(h, y1 + pad);
                 const int rw = rx1 - rx0, rh = ry1 - ry0;
 
-                const size_t plane = static_cast<size_t>(rw) * rh;
-                for (int y = 0; y < rh; ++y) {
-                    const uint8_t* src = in + (static_cast<size_t>(ry0 + y) * w + rx0) * 4;
-                    float* r = tileIn.get() + static_cast<size_t>(y) * rw;
+                const int prw = roundUp(rw), prh = roundUp(rh);
+                const size_t plane = static_cast<size_t>(prw) * prh;
+                for (int y = 0; y < prh; ++y) {
+                    float* r = tileIn.get() + static_cast<size_t>(y) * prw;
                     float* g = r + plane;
                     float* b = g + plane;
-                    for (int x = 0; x < rw; ++x) {
-                        r[x] = src[4 * x + 0] * (1.0f / 255.0f);
-                        g[x] = src[4 * x + 1] * (1.0f / 255.0f);
-                        b[x] = src[4 * x + 2] * (1.0f / 255.0f);
+                    if (y < rh) {
+                        const uint8_t* src = in + (static_cast<size_t>(ry0 + y) * w + rx0) * 4;
+                        for (int x = 0; x < rw; ++x) {
+                            r[x] = src[4 * x + 0] * (1.0f / 255.0f);
+                            g[x] = src[4 * x + 1] * (1.0f / 255.0f);
+                            b[x] = src[4 * x + 2] * (1.0f / 255.0f);
+                        }
+                        for (int x = rw; x < prw; ++x) {
+                            r[x] = r[rw - 1];
+                            g[x] = g[rw - 1];
+                            b[x] = b[rw - 1];
+                        }
+                    } else {
+                        const size_t last = static_cast<size_t>(rh - 1) * prw;
+                        const float* r0 = tileIn.get() + last;
+                        std::memcpy(r, r0, static_cast<size_t>(prw) * sizeof(float));
+                        std::memcpy(g, r0 + plane, static_cast<size_t>(prw) * sizeof(float));
+                        std::memcpy(b, r0 + 2 * plane, static_cast<size_t>(prw) * sizeof(float));
                     }
                 }
 
                 std::string err;
                 Executor::Status st = Executor::Status::Ok;
                 if (useGpu) {
-                    const gpu::Backend::Status gs = gpuBackend->run(tileIn.get(), rh, rw, tileOut.get(), &cancelFlag, &err);
+                    const gpu::Backend::Status gs = gpuBackend->run(tileIn.get(), prh, prw, tileOut.get(), &cancelFlag, &err);
                     if (gs == gpu::Backend::Status::Cancelled) {
                         setError("cancelled");
                         return false;
@@ -686,13 +705,13 @@ public:
                         err.clear();
                     }
                 }
-                if (!useGpu) st = exec->run(tileIn.get(), rh, rw, tileOut.get(), nthreads, &cancelFlag, &err);
+                if (!useGpu) st = exec->run(tileIn.get(), prh, prw, tileOut.get(), nthreads, &cancelFlag, &err);
                 if (st != Executor::Status::Ok) {
                     setError(err.empty() ? "processing failed" : err);
                     return false;
                 }
 
-                const int orw = rw * s, orh = rh * s;
+                const int orw = prw * s, orh = prh * s;
                 const size_t oplane = static_cast<size_t>(orw) * orh;
                 const int cx = (x0 - rx0) * s, cy = (y0 - ry0) * s;
                 const int cw = (x1 - x0) * s, ch = (y1 - y0) * s;

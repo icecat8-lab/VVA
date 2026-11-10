@@ -6,9 +6,9 @@ from .converter import ConversionError, convert
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="vva-convert",
-        description="Convert an x4 RRDBNet or MobileNetV3-Small classifier checkpoint (.pth or .npz) to a .vva model "
-                    "for the VVA engine.")
-    parser.add_argument("--input", "-i", required=True, help="PyTorch checkpoint (.pth/.pt) or NumPy weights (.npz)")
+        description="Convert an ONNX image model (.onnx), an x4 RRDBNet or a MobileNetV3-Small classifier "
+                    "checkpoint (.pth or .npz) to a .vva model for the VVA engine.")
+    parser.add_argument("--input", "-i", required=True, help="ONNX model (.onnx), PyTorch checkpoint (.pth/.pt) or NumPy weights (.npz)")
     parser.add_argument("--output", "-o", default=None, help="output .vva file (default: next to the input)")
     parser.add_argument("--fp32", action="store_true", help="store all weights as float32 (bigger, no fp16 rounding)")
     parser.add_argument("--name", default=None, help="model name stored in the file")

@@ -84,9 +84,9 @@ def main():
     code, _, err = run_cli(["-i", save_npz(bad, "missing"), "-o", os.path.join(WORK, "x.vva")])
     T.check(code == 1 and "body.1.rdb2.conv3.weight" in err, "missing weight names the key")
     x2 = {k: v.copy() for k, v in sd.items()}
-    x2["conv_first.weight"] = np.zeros((6, 12, 3, 3), np.float32)
+    x2["conv_first.weight"] = np.zeros((6, 5, 3, 3), np.float32)
     code, _, err = run_cli(["-i", save_npz(x2, "x2"), "-o", os.path.join(WORK, "x.vva")])
-    T.check(code == 1 and "12 input channels" in err, "pixel-unshuffle (x2/x1) models are rejected clearly")
+    T.check(code == 1 and "5 input channels" in err and "12" in err, "unsupported input channel counts are rejected clearly")
     wrong = {k: v.copy() for k, v in sd.items()}
     wrong["body.0.rdb1.conv5.weight"] = np.zeros((6, 7, 3, 3), np.float32)
     code, _, err = run_cli(["-i", save_npz(wrong, "wrong"), "-o", os.path.join(WORK, "x.vva")])

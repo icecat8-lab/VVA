@@ -49,6 +49,78 @@ def pixel_shuffle(x, r):
     c, h, w = x.shape
     return x.reshape(c // (r * r), r, r, h, w).transpose(0, 3, 1, 4, 2).reshape(c // (r * r), h * r, w * r)
 
+def pixel_unshuffle(x, r):
+    c, h, w = x.shape
+    return x.reshape(c, h // r, r, w // r, r).transpose(0, 2, 4, 1, 3).reshape(c * r * r, h // r, w // r)
+
+def conv_transpose2d(x, w, b=None, stride=(1, 1), padding=(0, 0), output_padding=(0, 0)):
+    x = np.asarray(x, dtype=np.float64)
+    w = np.asarray(w, dtype=np.float64)
+    in_c, out_c, kh, kw = w.shape
+    sh, sw = stride
+    ph, pw = padding
+    oph, opw = output_padding
+    _, h, wd = x.shape
+    ho = (h - 1) * sh - 2 * ph + kh + oph
+    wo = (wd - 1) * sw - 2 * pw + kw + opw
+    full = np.zeros((out_c, (h - 1) * sh + kh + oph, (wd - 1) * sw + kw + opw), dtype=np.float64)
+    for iy in range(h):
+        for ix in range(wd):
+            full[:, iy * sh: iy * sh + kh, ix * sw: ix * sw + kw] += np.tensordot(x[:, iy, ix], w, axes=([0], [0]))
+    out = full[:, ph: ph + ho, pw: pw + wo]
+    if b is not None:
+        out = out + np.asarray(b, dtype=np.float64)[:, None, None]
+    return out
+
+def pool2d(x, kernel, stride, padding, kind, count_include_pad=False):
+    x = np.asarray(x, dtype=np.float64)
+    c, h, w = x.shape
+    kh, kw = kernel
+    sh, sw = stride
+    ph, pw = padding
+    ho = (h + 2 * ph - kh) // sh + 1
+    wo = (w + 2 * pw - kw) // sw + 1
+    out = np.zeros((c, ho, wo))
+    for oy in range(ho):
+        for ox in range(wo):
+            ys, xs = oy * sh - ph, ox * sw - pw
+            win = x[:, max(ys, 0): min(ys + kh, h), max(xs, 0): min(xs + kw, w)]
+            if kind == "max":
+                out[:, oy, ox] = win.max(axis=(1, 2))
+            else:
+                denom = kh * kw if count_include_pad else win.shape[1] * win.shape[2]
+                out[:, oy, ox] = win.sum(axis=(1, 2)) / denom
+    return out
+
+def resize_bilinear(x, sh, sw, align_corners=False):
+    x = np.asarray(x, dtype=np.float64)
+    c, h, w = x.shape
+    ho, wo = h * sh, w * sw
+
+    def axis(n_in, n_out, scale):
+        o = np.arange(n_out, dtype=np.float64)
+        if align_corners:
+            src = o * (n_in - 1) / (n_out - 1) if n_out > 1 else np.zeros(n_out)
+        else:
+            src = np.maximum((o + 0.5) / scale - 0.5, 0.0)
+        i0 = np.minimum(np.floor(src).astype(int), n_in - 1)
+        i1 = np.minimum(i0 + 1, n_in - 1)
+        return i0, i1, src - i0
+
+    y0, y1, fy = axis(h, ho, sh)
+    x0, x1, fx = axis(w, wo, sw)
+    top = x[:, y0][:, :, x0] * (1 - fx) + x[:, y0][:, :, x1] * fx
+    bot = x[:, y1][:, :, x0] * (1 - fx) + x[:, y1][:, :, x1] * fx
+    return top * (1 - fy)[None, :, None] + bot * fy[None, :, None]
+
+def pad2d(x, pads, mode="constant", value=0.0):
+    t, l, b, r = pads
+    x = np.asarray(x, dtype=np.float64)
+    spec = ((0, 0), (t, b), (l, r))
+    if mode == "constant":
+        return np.pad(x, spec, mode="constant", constant_values=value)
+    return np.pad(x, spec, mode={"reflect": "reflect", "replicate": "edge"}[mode])
+
 def run_graph(meta, tensors, x):
     values = dict(tensors)
     values[meta["inputs"][0]["name"]] = np.asarray(x, dtype=np.float64)
@@ -83,6 +155,33 @@ def run_graph(meta, tensors, x):
             out = resize_nearest(a[0], *attrs["scale"])
         elif op == "PixelShuffle":
             out = pixel_shuffle(a[0], attrs["upscale"])
+        elif op == "PixelUnshuffle":
+            out = pixel_unshuffle(a[0], attrs["downscale"])
+        elif op == "Sub":
+            out = a[0] - a[1]
+        elif op == "Tanh":
+            out = np.tanh(a[0])
+        elif op == "SiLU":
+            out = a[0] / (1.0 + np.exp(-a[0]))
+        elif op == "PReLU":
+            slope = np.asarray(a[1], dtype=np.float64).reshape(-1)
+            slope = slope.reshape(-1, 1, 1) if slope.size > 1 else slope.reshape(1, 1, 1)
+            out = np.where(a[0] > 0, a[0], a[0] * slope)
+        elif op == "ChannelAffine":
+            out = a[0] * np.asarray(a[1], dtype=np.float64).reshape(-1, 1, 1) + np.asarray(a[2], dtype=np.float64).reshape(-1, 1, 1)
+        elif op == "ConvTranspose2D":
+            out = conv_transpose2d(a[0], a[1], a[2] if len(a) > 2 else None, tuple(attrs.get("stride", (1, 1))),
+                                   tuple(attrs.get("padding", (0, 0))), tuple(attrs.get("output_padding", (0, 0))))
+        elif op in ("MaxPool2D", "AvgPool2D"):
+            kernel = tuple(attrs["kernel"])
+            out = pool2d(a[0], kernel, tuple(attrs.get("stride", kernel)), tuple(attrs.get("padding", (0, 0))),
+                         "max" if op == "MaxPool2D" else "avg", bool(attrs.get("count_include_pad", False)))
+        elif op == "ResizeBilinear":
+            out = resize_bilinear(a[0], *attrs["scale"], align_corners=bool(attrs.get("align_corners", False)))
+        elif op == "Pad":
+            out = pad2d(a[0], attrs["pads"], attrs.get("mode", "constant"), attrs.get("value", 0.0))
+        elif op == "Slice":
+            out = a[0][attrs["start"]:attrs["end"]]
         else:
             raise ValueError("reference: unsupported operator " + op)
         values[node["outputs"][0]] = np.asarray(out, dtype=np.float64)
@@ -106,7 +205,11 @@ def rrdbnet_forward(sd, x, lrelu_slope=0.2, res_scale=0.2):
     nb = 0
     while "body.%d.rdb1.conv1.weight" % nb in sd:
         nb += 1
-    feat = conv("conv_first", np.asarray(x, dtype=np.float64))
+    x = np.asarray(x, dtype=np.float64)
+    factor = {3: 1, 12: 2, 48: 4}[sd["conv_first.weight"].shape[1]]
+    if factor > 1:
+        x = pixel_unshuffle(x, factor)
+    feat = conv("conv_first", x)
     t = feat
     for i in range(nb):
         o = rdb("body.%d.rdb1" % i, t)
