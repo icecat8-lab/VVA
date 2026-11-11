@@ -207,6 +207,20 @@ int main(int argc, char** argv) {
         CHECK(e.gpuActive() && b->variantIndex() == 1, "a wrong variant is skipped and the next correct one is used");
         std::vector<uint8_t> got(outBytes);
         CHECK(e.processImageTile(in.data(), W, H, got.data(), kAuto) && maxDiff(got, want) <= 1, "the chosen variant produces the right picture");
+        {
+            const std::string cfgPath = std::string(argv[1]) + ".gpucfg";
+            std::remove(cfgPath.c_str());
+            vva::Engine es;
+            es.loadModel(argv[1]);
+            Mode skipMode;
+            skipMode.badMask = (1 << 0) | (1 << 3);
+            attach(es, *model, skipMode, true);
+            const std::string st = es.gpuStatus();
+            CHECK(st.find("skipped:") != std::string::npos && st.find("rejected, error") != std::string::npos &&
+                      st.find(vva::gpu::convVariantName(3)) != std::string::npos,
+                  ("the status says which kernels were left out and why: " + st).c_str());
+            std::remove(cfgPath.c_str());
+        }
         vva::Engine e2;
         e2.loadModel(argv[1]);
         Mode all;

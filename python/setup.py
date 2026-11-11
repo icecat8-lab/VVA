@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="vva-converter",
-    version="1.2.0",
+    version="1.2.1",
     packages=find_packages(),
     install_requires=["numpy>=1.19.0"],
     extras_require={"torch": ["torch>=1.8.0"]},

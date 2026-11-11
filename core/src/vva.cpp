@@ -406,7 +406,10 @@ public:
         const int hi = onlyVariant >= 0 ? onlyVariant + 1 : variants;
         int best = -1;
         double bestRate = 0.0, bestScore = 0.0;
-        std::string problem, rates;
+        std::string problem, rates, skipped;
+        auto skip = [&](int v, const std::string& why) {
+            skipped += (skipped.empty() ? "" : "; ") + std::string(gpu::convVariantName(v)) + ": " + why.substr(0, 80);
+        };
         bool wrongOnly = true;
         for (int v = lo; v < hi; ++v) {
             gpuBackend->setVariant(v);
@@ -415,6 +418,7 @@ public:
             if (st != gpu::Backend::Status::Ok) {
                 problem = "the GPU test run failed: " + err;
                 wrongOnly = false;
+                skip(v, "did not run (" + err + ")");
                 if (st == gpu::Backend::Status::DeviceLost) break;
                 continue;
             }
@@ -426,6 +430,9 @@ public:
             const double tolerance = gpu::variantIsHalf(v) ? 6e-3 : 2e-3;
             if (!(worst / range <= tolerance)) {
                 problem = std::string("the GPU test gave wrong results (error ") + std::to_string(worst / range) + ")";
+                char why[64];
+                std::snprintf(why, sizeof(why), "rejected, error %.1e of the range (limit %.0e)", worst / range, tolerance);
+                skip(v, why);
                 continue;
             }
             double rate = 0.0;
@@ -465,8 +472,9 @@ public:
             return std::string();
         }
         const double cpuRate = (static_cast<double>(h1) * w1) / std::max(cpuSeconds, 1e-6);
-        char buf[200];
-        std::snprintf(buf, sizeof(buf), "kernel %s [px/s: %s]; CPU %.0f px/s", gpu::convVariantName(best), rates.c_str(), cpuRate);
+        char buf[640];
+        std::snprintf(buf, sizeof(buf), "kernel %s [px/s: %s]%s%s%s; CPU %.0f px/s", gpu::convVariantName(best), rates.c_str(),
+                      skipped.empty() ? "" : " [skipped: ", skipped.c_str(), skipped.empty() ? "" : "]", cpuRate);
         *detail = buf;
         if (bestRate < 1.3 * cpuRate) {
             *shortReason = std::string("not faster than the CPU (") + buf + ")";
