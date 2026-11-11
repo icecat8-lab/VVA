@@ -210,20 +210,21 @@ int main(int argc, char** argv) {
         vva::Engine e2;
         e2.loadModel(argv[1]);
         Mode all;
-        all.badMask = 7;
+        all.badMask = (1 << vva::gpu::kConvVariants) - 1;
         attach(e2, *model, all);
         CHECK(!e2.gpuActive() && e2.gpuStatus().find("wrong results") != std::string::npos, "every variant wrong -> GPU rejected");
-        for (int v = 0; v < 3; ++v) {
+        for (int v = 0; v < vva::gpu::kConvVariants; ++v) {
             vva::Engine e3;
             e3.loadModel(argv[1]);
             e3.setTileSize(16);
             e3.setTilePad(8);
             Mode only;
-            only.badMask = 7 & ~(1 << v);
+            only.badMask = ((1 << vva::gpu::kConvVariants) - 1) & ~(1 << v);
             EmuBackend* bv = attach(e3, *model, only);
             CHECK(e3.gpuActive() && bv->variantIndex() == v, "only variant v is correct and gets chosen");
             std::vector<uint8_t> g(outBytes);
-            CHECK(e3.processImageTile(in.data(), W, H, g.data(), kAuto) && maxDiff(g, want) <= 1, "variant output equals the CPU picture");
+            CHECK(e3.processImageTile(in.data(), W, H, g.data(), kAuto) && maxDiff(g, want) <= (vva::gpu::variantIsHalf(v) ? 2 : 1),
+                  "variant output equals the CPU picture");
         }
     }
 

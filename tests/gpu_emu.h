@@ -17,6 +17,7 @@ public:
 private:
     const std::vector<float>& weights_;
     std::vector<float> arena_;
+    std::vector<float> weightsHalf_;
     int lastH_ = -1, lastW_ = -1;
     size_t lastBytes_ = 0;
 };

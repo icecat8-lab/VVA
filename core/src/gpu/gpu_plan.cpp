@@ -143,6 +143,12 @@ int Plan::outChannels() const { return impl_->outC; }
 int Plan::scale() const { return impl_->scale; }
 const std::vector<float>& Plan::weights() const { return impl_->weights; }
 
+std::vector<std::pair<size_t, size_t>> Plan::weightSlots() const {
+    std::vector<std::pair<size_t, size_t>> slots;
+    for (const ConvData& cd : impl_->convs) slots.emplace_back(cd.offset, cd.floats);
+    return slots;
+}
+
 std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
     if (model.inputs().size() != 1 || model.outputs().size() != 1) {
         fail(reason, "the GPU path needs exactly one input and one output");
@@ -546,9 +552,12 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
         if (out.h > 16384 || out.w > 16384) return fail(error, "tensor too large");
     }
 
+    const int eb = variantElemBytes(convVariant);
+    const bool half = variantIsHalf(convVariant);
+    prog.elemBytes = eb;
     auto c8 = [&](int t) { return static_cast<size_t>((tensors[static_cast<size_t>(t)].c + 7) / 8 * 8); };
-    auto plane = [&](int t) { return planeFloats(tensors[static_cast<size_t>(t)].h, tensors[static_cast<size_t>(t)].w); };
-    auto bytes = [&](int t) { return c8(t) * plane(t) * sizeof(float); };
+    auto plane = [&](int t) { return planeFloats(tensors[static_cast<size_t>(t)].h, tensors[static_cast<size_t>(t)].w, eb); };
+    auto bytes = [&](int t) { return c8(t) * plane(t) * static_cast<size_t>(eb); };
 
     auto geometry = [&](int t) {
         return (static_cast<uint64_t>(tensors[static_cast<size_t>(t)].h) << 32) | static_cast<uint64_t>(tensors[static_cast<size_t>(t)].w);
@@ -558,7 +567,7 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
     std::vector<bool> allocated(tensors.size(), false);
     auto allocate = [&](int t) {
         ClassAlloc& ca = classes[geometry(t)];
-        ca.unit = plane(t) * sizeof(float);
+        ca.unit = plane(t) * static_cast<size_t>(eb);
         rel[static_cast<size_t>(t)] = ca.alloc(bytes(t));
         allocated[static_cast<size_t>(t)] = true;
     };
@@ -642,7 +651,7 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
                 cmd.bind[0] = bindArenaSlack(op.in[0]);
                 cmd.bind[1].buffer = 1;
                 cmd.bind[1].offset = cd.offset * sizeof(float);
-                cmd.bind[1].size = cd.floats * sizeof(float);
+                cmd.bind[1].size = cd.floats * static_cast<size_t>(eb);
                 cmd.bind[2] = bindArena(op.out);
                 cmd.bind[3] = op.res >= 0 ? bindArena(op.res) : bindArena(op.in[0]);
                 const int pixelsPer = convVariant == 2 ? 8 : 4;
@@ -657,7 +666,7 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
             const size_t count = c8(op.out) * plane(op.out);
             Command cmd;
             cmd.type = Command::kDispatch;
-            cmd.kernel = Kernel::Eltwise;
+            cmd.kernel = half ? Kernel::Eltwise_F16 : Kernel::Eltwise;
             const size_t groups = (count + 63) / 64;
             const size_t gx = std::min<size_t>(groups, 32768);
             cmd.gx = static_cast<uint32_t>(gx);
@@ -680,7 +689,7 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
                 Command cmd;
                 cmd.type = Command::kCopy;
                 cmd.copySrc = offset(t);
-                cmd.copyDst = offset(op.out) + channelOffset * plane(op.out) * sizeof(float);
+                cmd.copyDst = offset(op.out) + channelOffset * plane(op.out) * static_cast<size_t>(eb);
                 cmd.copyBytes = bytes(t);
                 cmd.flops = static_cast<double>(cmd.copyBytes) / 4.0;
                 channelOffset += c8(t);
@@ -691,7 +700,7 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
             const Tensor& tout = tensors[static_cast<size_t>(op.out)];
             Command cmd;
             cmd.type = Command::kDispatch;
-            cmd.kernel = Kernel::Resize;
+            cmd.kernel = half ? Kernel::Resize_F16 : Kernel::Resize;
             cmd.push.i[0] = tin.h;
             cmd.push.i[1] = tin.w;
             cmd.push.i[2] = op.sh;

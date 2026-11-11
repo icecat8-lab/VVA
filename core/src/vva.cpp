@@ -151,7 +151,7 @@ struct GpuConfig {
 };
 
 std::string formatGpuConfig(const GpuConfig& c) {
-    std::string s = "vva-gpu-config 1\n";
+    std::string s = "vva-gpu-config 2\n";
     s += "identity=" + c.identity + "\n";
     s += std::string("usable=") + (c.usable ? "1" : "0") + "\n";
     s += "variant=" + std::to_string(c.variant) + "\n";
@@ -162,7 +162,7 @@ std::string formatGpuConfig(const GpuConfig& c) {
 
 bool parseGpuConfig(const std::string& text, GpuConfig& c) {
     c = GpuConfig();
-    if (text.compare(0, 17, "vva-gpu-config 1\n") != 0) return false;
+    if (text.compare(0, 17, "vva-gpu-config 2\n") != 0) return false;
     size_t pos = 17;
     bool haveIdentity = false, haveUsable = false;
     while (pos < text.size()) {
@@ -405,7 +405,7 @@ public:
         const int lo = onlyVariant >= 0 ? onlyVariant : 0;
         const int hi = onlyVariant >= 0 ? onlyVariant + 1 : variants;
         int best = -1;
-        double bestRate = 0.0;
+        double bestRate = 0.0, bestScore = 0.0;
         std::string problem, rates;
         bool wrongOnly = true;
         for (int v = lo; v < hi; ++v) {
@@ -423,7 +423,8 @@ public:
                 const double d = std::fabs(static_cast<double>(cpu[i]) - static_cast<double>(gpuOut[i]));
                 if (!(d <= worst)) worst = d;
             }
-            if (!(worst / range <= 2e-3)) {
+            const double tolerance = gpu::variantIsHalf(v) ? 6e-3 : 2e-3;
+            if (!(worst / range <= tolerance)) {
                 problem = std::string("the GPU test gave wrong results (error ") + std::to_string(worst / range) + ")";
                 continue;
             }
@@ -445,9 +446,11 @@ public:
                 std::snprintf(buf, sizeof(buf), "%s%s %.0f", rates.empty() ? "" : ", ", gpu::convVariantName(v), rate);
                 rates += buf;
             }
-            if (best < 0 || rate > bestRate) {
+            const double score = gpu::variantIsHalf(v) ? rate / 1.15 : rate;
+            if (best < 0 || score > bestScore) {
                 best = v;
                 bestRate = rate;
+                bestScore = score;
             }
         }
         if (best < 0) {
@@ -557,6 +560,7 @@ public:
             handles.device = vkContext.device;
             handles.queue = vkContext.computeQueue;
             handles.queueFamily = vkContext.queueFamilyIndex;
+            handles.fp16 = vkContext.fp16;
             std::string why;
             gpuBackend = gpu::createVulkanBackend(handles, *model, &why);
             if (!gpuBackend) {
@@ -634,6 +638,14 @@ public:
         bool gpuFellBack = false;
         int tile = tileSize > 0 ? std::max(tileSize, 16) : chooseTile(w, h, pad, useGpu);
         if (tile >= std::max(w, h)) tile = std::max(w, h);
+        if (tileSize > 0 && useGpu) {
+            const int gm = std::max(1, exec->inputMultiple());
+            while (tile > 32) {
+                const int rw = std::min(w, tile + 2 * pad), rh = std::min(h, tile + 2 * pad);
+                if (gpuBackend->fits((rh + gm - 1) / gm * gm, (rw + gm - 1) / gm * gm)) break;
+                tile = std::max(32, tile * 7 / 8 / 8 * 8);
+            }
+        }
         const int nx = (w + tile - 1) / tile;
         const int ny = (h + tile - 1) / tile;
         const int total = nx * ny;

@@ -1,10 +1,15 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
+#ifdef VVA_STORE_F16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
+#include "kernel_types.inc"
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-layout(std430, set = 0, binding = 0) readonly buffer ABuf { float srcA[]; };
-layout(std430, set = 0, binding = 1) readonly buffer BBuf { float srcB[]; };
-layout(std430, set = 0, binding = 2) buffer OutBuf { float dst[]; };
+layout(std430, set = 0, binding = 0) readonly buffer ABuf { vva_store_t srcA[]; };
+layout(std430, set = 0, binding = 1) readonly buffer BBuf { vva_store_t srcB[]; };
+layout(std430, set = 0, binding = 2) buffer OutBuf { vva_store_t dst[]; };
 
 layout(push_constant) uniform Params {
     int i0;

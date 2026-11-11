@@ -14,6 +14,7 @@ public:
     VkQueue computeQueue = VK_NULL_HANDLE;
     uint32_t queueFamilyIndex = 0;
     std::string deviceName;
+    bool fp16 = false;
 
     bool ready() const { return device != VK_NULL_HANDLE; }
 
@@ -73,15 +74,34 @@ public:
         queueCreateInfo.queueCount = 1;
         queueCreateInfo.pQueuePriorities = &queuePriority;
 
+        static const char* const kFp16Extensions[] = {"VK_KHR_shader_float16_int8", "VK_KHR_16bit_storage"};
+        VkPhysicalDevice16BitStorageFeatures storage{};
+        storage.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES;
+        storage.storageBuffer16BitAccess = VK_TRUE;
+        VkPhysicalDeviceShaderFloat16Int8FeaturesKHR shaderFp16{};
+        shaderFp16.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES_KHR;
+        shaderFp16.shaderFloat16 = VK_TRUE;
+        shaderFp16.pNext = &storage;
+
         VkDeviceCreateInfo deviceCreateInfo{};
         deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         deviceCreateInfo.queueCreateInfoCount = 1;
         deviceCreateInfo.pQueueCreateInfos = &queueCreateInfo;
+        deviceCreateInfo.pNext = &shaderFp16;
+        deviceCreateInfo.enabledExtensionCount = 2;
+        deviceCreateInfo.ppEnabledExtensionNames = kFp16Extensions;
 
+        fp16 = true;
         if (vkCreateDevice(physicalDevice, &deviceCreateInfo, nullptr, &device) != VK_SUCCESS) {
-            device = VK_NULL_HANDLE;
-            destroy();
-            return false;
+            fp16 = false;
+            deviceCreateInfo.pNext = nullptr;
+            deviceCreateInfo.enabledExtensionCount = 0;
+            deviceCreateInfo.ppEnabledExtensionNames = nullptr;
+            if (vkCreateDevice(physicalDevice, &deviceCreateInfo, nullptr, &device) != VK_SUCCESS) {
+                device = VK_NULL_HANDLE;
+                destroy();
+                return false;
+            }
         }
         vkGetDeviceQueue(device, queueFamilyIndex, 0, &computeQueue);
         return true;
@@ -98,6 +118,7 @@ public:
         }
         physicalDevice = VK_NULL_HANDLE;
         computeQueue = VK_NULL_HANDLE;
+        fp16 = false;
     }
 
     ~VulkanContext() { destroy(); }

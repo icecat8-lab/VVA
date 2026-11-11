@@ -115,7 +115,14 @@ Notes:
 
 When a model is loaded, the engine tests the GPU path once: it runs a small image on both the GPU and the CPU,
 compares the results and compares the speed. The GPU is used only if the results agree and it is clearly faster.
-The kernel is chosen on the device itself: three variants of the convolution are tried and the fastest correct one
+Five convolution kernels compete: three that keep activations in fp32 and two that keep activations and weights in
+fp16 (half the memory traffic and half the arena, so larger tiles fit; one does its arithmetic in fp32, the other in
+fp16). An fp16 kernel needs a device with `VK_KHR_16bit_storage` and `shaderFloat16`; it is chosen only when its result
+stays within 6e-3 of the output range of the CPU result (about 1.5 levels of an 8-bit picture) and it is at least 15%
+faster than the best fp32 kernel. If the fp16 shaders do not compile or the device lacks the features, the fp32
+kernels are used. An explicit `--tile` that is too large for the GPU is reduced to what fits instead of falling
+back to the CPU.
+The kernel is chosen on the device itself: every available variant of the convolution is tried and the fastest correct one
 is used, so no GPU model is assumed. The verdict is remembered per GPU and driver in `<model>.gpucfg` (valid for 30
 days), which avoids repeating the tuning at every start; delete the file to test again. If a driver crashes during
 that test, a marker file (`<model>.gpuprobe`) keeps the GPU off on the next start. `getGpuStatus()` /

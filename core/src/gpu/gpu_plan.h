@@ -22,6 +22,7 @@ public:
     int outChannels() const;
     int scale() const;
     const std::vector<float>& weights() const;
+    std::vector<std::pair<size_t, size_t>> weightSlots() const;
 
     static void setWorkTargets(double dispatchFlops, double segmentFlops);
 

@@ -42,9 +42,9 @@ int main() {
     c.variant = 5;
     CHECK(!vva::gpuConfigFresh(c, c.identity, 3, 1000000 + 10), "a variant that does not exist: not valid");
     CHECK(!vva::parseGpuConfig("garbage", back), "garbage is rejected");
-    CHECK(!vva::parseGpuConfig("vva-gpu-config 1\nvariant=1\n", back), "a result without identity is rejected");
-    CHECK(!vva::parseGpuConfig("vva-gpu-config 2\nidentity=x\nusable=1\n", back), "another format version is rejected");
-    CHECK(vva::parseGpuConfig("vva-gpu-config 1\nidentity=x\nusable=0\nreason=" + std::string(500, 'r') + "\n", back) && back.reason.size() == 200,
+    CHECK(!vva::parseGpuConfig("vva-gpu-config 2\nvariant=1\n", back), "a result without identity is rejected");
+    CHECK(!vva::parseGpuConfig("vva-gpu-config 1\nidentity=x\nusable=1\n", back), "another format version is rejected");
+    CHECK(vva::parseGpuConfig("vva-gpu-config 2\nidentity=x\nusable=0\nreason=" + std::string(500, 'r') + "\n", back) && back.reason.size() == 200,
           "a very long reason is cut");
     std::printf("budget_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;

@@ -17,6 +17,7 @@ struct VulkanHandles {
     void* device = nullptr;
     void* queue = nullptr;
     uint32_t queueFamily = 0;
+    bool fp16 = false;
 };
 
 class Backend {

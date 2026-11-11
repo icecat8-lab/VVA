@@ -10,9 +10,13 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GPU = os.path.join(ROOT, "core", "src", "gpu")
 
-SHADERS = [("kSpvConv3x3", "conv3x3.comp", None), ("kSpvEltwise", "eltwise.comp", None),
-           ("kSpvResize", "resize.comp", None), ("kSpvConv4oc", "conv3x3_4oc.comp", "VVA_SPV_CONV4OC"),
-           ("kSpvConv8px", "conv3x3_8px.comp", "VVA_SPV_CONV8PX")]
+SHADERS = [("kSpvConv3x3", "conv3x3.comp", None, []), ("kSpvEltwise", "eltwise.comp", None, []),
+           ("kSpvResize", "resize.comp", None, []), ("kSpvConv4oc", "conv3x3_4oc.comp", "VVA_SPV_CONV4OC", []),
+           ("kSpvConv8px", "conv3x3_8px.comp", "VVA_SPV_CONV8PX", []),
+           ("kSpvConv3x3H", "conv3x3.comp", "VVA_SPV_CONV_H", ["VVA_STORE_F16"]),
+           ("kSpvConv3x3HA", "conv3x3.comp", "VVA_SPV_CONV_HA", ["VVA_STORE_F16", "VVA_MATH_F16"]),
+           ("kSpvEltwiseH", "eltwise.comp", "VVA_SPV_ELT_H", ["VVA_STORE_F16"]),
+           ("kSpvResizeH", "resize.comp", "VVA_SPV_RES_H", ["VVA_STORE_F16"])]
 
 def spv_to_array(name, data):
     if len(data) % 4 != 0 or len(data) < 20:
@@ -39,10 +43,11 @@ def build_header(blobs):
 def compile_all(glslc, log=sys.stderr):
     blobs = []
     with tempfile.TemporaryDirectory() as tmp:
-        for name, src, macro in SHADERS:
-            spv = os.path.join(tmp, src + ".spv")
-            cmd = [glslc, "-O", "--target-env=vulkan1.1", "-I", os.path.join(GPU, "kernels"), "-o", spv,
-                   os.path.join(GPU, "shaders", src)]
+        for name, src, macro, defines in SHADERS:
+            spv = os.path.join(tmp, name + ".spv")
+            cmd = [glslc, "-O", "--target-env=vulkan1.1", "-I", os.path.join(GPU, "kernels")]
+            cmd += ["-D" + d for d in defines]
+            cmd += ["-o", spv, os.path.join(GPU, "shaders", src)]
             r = subprocess.run(cmd, capture_output=True, text=True)
             if r.returncode != 0:
                 log.write(r.stdout + r.stderr)

@@ -40,6 +40,18 @@ std::unique_ptr<Backend> createVulkanBackend(const VulkanHandles&, const Model&,
 #ifndef VVA_SPV_CONV8PX
 #define VVA_SPV_CONV8PX 1
 #endif
+#ifndef VVA_SPV_CONV_H
+#define VVA_SPV_CONV_H 1
+#endif
+#ifndef VVA_SPV_CONV_HA
+#define VVA_SPV_CONV_HA 1
+#endif
+#ifndef VVA_SPV_ELT_H
+#define VVA_SPV_ELT_H 1
+#endif
+#ifndef VVA_SPV_RES_H
+#define VVA_SPV_RES_H 1
+#endif
 
 namespace vva {
 namespace gpu {
@@ -69,6 +81,7 @@ public:
           dev_(static_cast<VkDevice>(vk.device)),
           queue_(static_cast<VkQueue>(vk.queue)),
           family_(vk.queueFamily),
+          fp16_(vk.fp16),
           plan_(std::move(plan)) {}
 
     ~VulkanBackend() override { teardown(); }
@@ -98,6 +111,12 @@ public:
         }
         if (VVA_SPV_CONV4OC) createShader(kSpvConv4oc, sizeof(kSpvConv4oc), shaders_[3]);
         if (VVA_SPV_CONV8PX) createShader(kSpvConv8px, sizeof(kSpvConv8px), shaders_[4]);
+        if (fp16_) {
+            if (VVA_SPV_CONV_H) createShader(kSpvConv3x3H, sizeof(kSpvConv3x3H), shaders_[5]);
+            if (VVA_SPV_CONV_HA) createShader(kSpvConv3x3HA, sizeof(kSpvConv3x3HA), shaders_[6]);
+            if (VVA_SPV_ELT_H) createShader(kSpvEltwiseH, sizeof(kSpvEltwiseH), shaders_[7]);
+            if (VVA_SPV_RES_H) createShader(kSpvResizeH, sizeof(kSpvResizeH), shaders_[8]);
+        }
         VkDescriptorSetLayoutBinding binds[4]{};
         for (uint32_t i = 0; i < 4; ++i) {
             binds[i].binding = i;
@@ -127,21 +146,10 @@ public:
             *status = "cannot create the pipeline layout";
             return false;
         }
-        for (int k = 0; k < kPipelines; ++k) {
-            VkComputePipelineCreateInfo ci{};
-            ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-            ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-            ci.stage.module = shaders_[k];
-            ci.stage.pName = "main";
-            ci.layout = layout_;
-            if (shaders_[k] == VK_NULL_HANDLE) continue;
-            if (vkCreateComputePipelines(dev_, VK_NULL_HANDLE, 1, &ci, nullptr, &pipelines_[k]) != VK_SUCCESS) {
-                if (k < 3) {
-                    *status = "the driver could not build a compute pipeline";
-                    return false;
-                }
-                pipelines_[k] = VK_NULL_HANDLE;
+        for (int k = 0; k < 3; ++k) {
+            if (!ensurePipeline(k)) {
+                *status = "the driver could not build a compute pipeline";
+                return false;
             }
         }
         VkFenceCreateInfo fi{};
@@ -156,6 +164,57 @@ public:
             return false;
         }
         std::memcpy(weights_.mapped, w.data(), w.size() * sizeof(float));
+        return true;
+    }
+
+    bool ensurePipeline(int k) {
+        if (pipelines_[k] != VK_NULL_HANDLE) return true;
+        if (shaders_[k] == VK_NULL_HANDLE || pipelineFailed_[k]) return false;
+        VkComputePipelineCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        ci.stage.module = shaders_[k];
+        ci.stage.pName = "main";
+        ci.layout = layout_;
+        if (vkCreateComputePipelines(dev_, VK_NULL_HANDLE, 1, &ci, nullptr, &pipelines_[k]) != VK_SUCCESS) {
+            pipelines_[k] = VK_NULL_HANDLE;
+            pipelineFailed_[k] = true;
+            return false;
+        }
+        return true;
+    }
+
+    bool variantAvailable(int v) const {
+        if (v < 0 || v >= kConvVariants) return false;
+        if (shaders_[static_cast<int>(convKernel(v))] == VK_NULL_HANDLE) return false;
+        if (variantIsHalf(v) && (!fp16_ || shaders_[static_cast<int>(Kernel::Eltwise_F16)] == VK_NULL_HANDLE ||
+                                 shaders_[static_cast<int>(Kernel::Resize_F16)] == VK_NULL_HANDLE)) {
+            return false;
+        }
+        return true;
+    }
+
+    bool preparePipelines(int v) {
+        if (!variantAvailable(v)) return false;
+        const bool half = variantIsHalf(v);
+        return ensurePipeline(static_cast<int>(convKernel(v))) &&
+               ensurePipeline(static_cast<int>(half ? Kernel::Eltwise_F16 : Kernel::Eltwise)) &&
+               ensurePipeline(static_cast<int>(half ? Kernel::Resize_F16 : Kernel::Resize));
+    }
+
+    bool ensureHalfWeights() {
+        if (weightsH_.buffer != VK_NULL_HANDLE) return true;
+        const std::vector<float>& w = plan_->weights();
+        if (!createMem(w.size() * sizeof(float), weightsH_)) {
+            destroyMem(weightsH_);
+            return false;
+        }
+        std::memset(weightsH_.mapped, 0, weightsH_.size);
+        for (const auto& slot : plan_->weightSlots()) {
+            uint16_t* dst = reinterpret_cast<uint16_t*>(static_cast<char*>(weightsH_.mapped) + slot.first * sizeof(float));
+            for (size_t i = 0; i < slot.second; ++i) dst[i] = floatToHalf(w[slot.first + i]);
+        }
         return true;
     }
 
@@ -177,11 +236,15 @@ public:
         const Program& p = c->program;
         lastH_ = lastW_ = -1;
         std::memset(arena_.mapped, 0, arena_.size);
-        float* inBase = reinterpret_cast<float*>(static_cast<char*>(arena_.mapped) + p.inputOffset);
+        char* inRaw = static_cast<char*>(arena_.mapped) + p.inputOffset;
         const size_t row = static_cast<size_t>(w) + 2;
         for (int ch = 0; ch < p.inChannels; ++ch) {
             for (int y = 0; y < h; ++y) {
-                for (int x = 0; x < w; ++x) inBase[static_cast<size_t>(ch) * p.inPlane + (static_cast<size_t>(y) + 1) * row + x + 1] = 0.5f;
+                for (int x = 0; x < w; ++x) {
+                    const size_t at = static_cast<size_t>(ch) * p.inPlane + (static_cast<size_t>(y) + 1) * row + x + 1;
+                    if (p.elemBytes == 2) reinterpret_cast<uint16_t*>(inRaw)[at] = floatToHalf(0.5f);
+                    else reinterpret_cast<float*>(inRaw)[at] = 0.5f;
+                }
             }
         }
         std::vector<const Command*> work;
@@ -215,19 +278,22 @@ public:
         for (size_t i = 0; i < work.size() && i < ms.size(); ++i) {
             const Command& cmd = *work[i];
             const double t = std::max(0.0, ms[i] - overhead);
-            const int kind = cmd.type == Command::kCopy ? 3 : static_cast<int>(cmd.kernel);
+            int kind = 2;
+            if (cmd.type == Command::kCopy) kind = 3;
+            else if (isConvKernel(cmd.kernel)) kind = 0;
+            else if (cmd.kernel == Kernel::Eltwise || cmd.kernel == Kernel::Eltwise_F16) kind = 1;
             kindMs[kind] += t;
             ++kindCount[kind];
             total += t;
-            if (cmd.type == Command::kDispatch && cmd.kernel == Kernel::Conv3x3) {
+            if (cmd.type == Command::kDispatch && isConvKernel(cmd.kernel)) {
                 convs.push_back({t, cmd.push.i[0], static_cast<int>(cmd.gz) * 8, cmd.push.i[1], cmd.push.i[2]});
             }
         }
         std::sort(convs.begin(), convs.end(), [](const Conv& a, const Conv& b) { return a.ms > b.ms; });
         char buf[256];
         std::string out;
-        std::snprintf(buf, sizeof(buf), "tile %dx%d: %.0f ms of GPU work in %zu commands (a submit costs %.2f ms)\n", h, w, total,
-                      work.size(), overhead);
+        std::snprintf(buf, sizeof(buf), "kernel: %s\ntile %dx%d: %.0f ms of GPU work in %zu commands (a submit costs %.2f ms)\n",
+                      convVariantName(variant_), h, w, total, work.size(), overhead);
         out += buf;
         const char* names[4] = {"convolution 3x3", "element-wise", "nearest resize", "buffer copy"};
         for (int k = 0; k < 4; ++k) {
@@ -247,7 +313,10 @@ public:
     int inChannels() const override { return plan_->inChannels(); }
     int outChannels() const override { return plan_->outChannels(); }
 
-    int variantCount() const override { return kConvVariants; }
+    int variantCount() const override {
+        if (variantAvailable(4)) return 5;
+        return variantAvailable(3) ? 4 : 3;
+    }
     int variantIndex() const override { return variant_; }
     void setVariant(int variant) override {
         if (variant < 0 || variant >= kConvVariants || variant == variant_) return;
@@ -269,7 +338,7 @@ public:
 
     Status run(const float* in, int h, int w, float* out, const std::atomic<bool>* cancel, std::string* error) override {
         if (lost_) return fail(error, "the GPU was lost earlier", Status::DeviceLost);
-        if (pipelines_[static_cast<int>(convKernel(variant_))] == VK_NULL_HANDLE) {
+        if (!preparePipelines(variant_)) {
             return fail(error, "this kernel variant is not available on this device", Status::Error);
         }
         Compiled* c = compiled(h, w, error);
@@ -282,11 +351,17 @@ public:
             lastW_ = w;
         }
         const size_t inRow = static_cast<size_t>(w) + 2;
-        float* inBase = reinterpret_cast<float*>(static_cast<char*>(arena_.mapped) + p.inputOffset);
+        char* inRaw = static_cast<char*>(arena_.mapped) + p.inputOffset;
         for (int ch = 0; ch < p.inChannels; ++ch) {
             for (int y = 0; y < h; ++y) {
-                std::memcpy(inBase + static_cast<size_t>(ch) * p.inPlane + (static_cast<size_t>(y) + 1) * inRow + 1,
-                            in + (static_cast<size_t>(ch) * h + y) * w, static_cast<size_t>(w) * sizeof(float));
+                const float* src = in + (static_cast<size_t>(ch) * h + y) * w;
+                const size_t at = static_cast<size_t>(ch) * p.inPlane + (static_cast<size_t>(y) + 1) * inRow + 1;
+                if (p.elemBytes == 2) {
+                    uint16_t* dst = reinterpret_cast<uint16_t*>(inRaw) + at;
+                    for (int x = 0; x < w; ++x) dst[x] = floatToHalf(src[x]);
+                } else {
+                    std::memcpy(reinterpret_cast<float*>(inRaw) + at, src, static_cast<size_t>(w) * sizeof(float));
+                }
             }
         }
 
@@ -304,12 +379,17 @@ public:
         }
 
         const size_t outRow = static_cast<size_t>(p.outW) + 2;
-        const float* outBase = reinterpret_cast<const float*>(static_cast<const char*>(arena_.mapped) + p.outputOffset);
+        const char* outRaw = static_cast<const char*>(arena_.mapped) + p.outputOffset;
         for (int ch = 0; ch < p.outChannels; ++ch) {
             for (int y = 0; y < p.outH; ++y) {
-                std::memcpy(out + (static_cast<size_t>(ch) * p.outH + y) * p.outW,
-                            outBase + static_cast<size_t>(ch) * p.outPlane + (static_cast<size_t>(y) + 1) * outRow + 1,
-                            static_cast<size_t>(p.outW) * sizeof(float));
+                float* dst = out + (static_cast<size_t>(ch) * p.outH + y) * p.outW;
+                const size_t at = static_cast<size_t>(ch) * p.outPlane + (static_cast<size_t>(y) + 1) * outRow + 1;
+                if (p.elemBytes == 2) {
+                    const uint16_t* src = reinterpret_cast<const uint16_t*>(outRaw) + at;
+                    for (int x = 0; x < p.outW; ++x) dst[x] = halfToFloat(src[x]);
+                } else {
+                    std::memcpy(dst, reinterpret_cast<const float*>(outRaw) + at, static_cast<size_t>(p.outW) * sizeof(float));
+                }
             }
         }
         return Status::Ok;
@@ -332,7 +412,11 @@ private:
         si.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
         si.codeSize = bytes;
         si.pCode = code;
-        return vkCreateShaderModule(dev_, &si, nullptr, &module) == VK_SUCCESS;
+        if (vkCreateShaderModule(dev_, &si, nullptr, &module) != VK_SUCCESS) {
+            module = VK_NULL_HANDLE;
+            return false;
+        }
+        return true;
     }
 
     bool pickMemoryType(uint32_t bits, uint32_t& index) {
@@ -395,6 +479,7 @@ private:
         dropPrograms();
         destroyMem(arena_);
         destroyMem(weights_);
+        destroyMem(weightsH_);
         if (fence_ != VK_NULL_HANDLE) vkDestroyFence(dev_, fence_, nullptr);
         for (int k = 0; k < kPipelines; ++k) {
             if (pipelines_[k] != VK_NULL_HANDLE) vkDestroyPipeline(dev_, pipelines_[k], nullptr);
@@ -411,6 +496,14 @@ private:
         if (cache_.size() >= 6) {
             vkQueueWaitIdle(queue_);
             dropPrograms();
+        }
+        if (!preparePipelines(variant_)) {
+            if (error) *error = "this kernel variant is not available on this device";
+            return nullptr;
+        }
+        if (variantIsHalf(variant_) && !ensureHalfWeights()) {
+            if (error) *error = "cannot allocate the fp16 weights buffer";
+            return nullptr;
         }
         Compiled c;
         if (!plan_->build(h, w, c.program, error, variant_)) return nullptr;
@@ -514,7 +607,7 @@ private:
                 VkDescriptorBufferInfo infos[4]{};
                 VkWriteDescriptorSet writes[4]{};
                 for (uint32_t i = 0; i < 4; ++i) {
-                    infos[i].buffer = cmd.bind[i].buffer == 1 ? weights_.buffer : arena_.buffer;
+                    infos[i].buffer = cmd.bind[i].buffer == 1 ? (p.elemBytes == 2 ? weightsH_.buffer : weights_.buffer) : arena_.buffer;
                     infos[i].offset = cmd.bind[i].offset;
                     infos[i].range = cmd.bind[i].size;
                     writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -547,17 +640,19 @@ private:
     VkDevice dev_;
     VkQueue queue_;
     uint32_t family_;
+    bool fp16_ = false;
     std::unique_ptr<Plan> plan_;
     size_t maxRange_ = 0;
     std::string deviceName_, identity_;
-    static constexpr int kPipelines = 5;
+    static constexpr int kPipelines = kKernelCount;
     VkShaderModule shaders_[kPipelines] = {};
     VkPipeline pipelines_[kPipelines] = {};
+    bool pipelineFailed_[kPipelines] = {};
     int variant_ = 0;
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     VkFence fence_ = VK_NULL_HANDLE;
-    Mem arena_, weights_;
+    Mem arena_, weights_, weightsH_;
     std::map<std::pair<int, int>, Compiled> cache_;
     int lastH_ = -1, lastW_ = -1;
     bool lost_ = false;
