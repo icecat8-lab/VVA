@@ -49,6 +49,7 @@ public:
     void setThreads(int threads);
     void setMemoryBudgetMB(int mb);
     void setProgressCallback(ProgressCallback cb);
+    void setCacheDir(const std::string& dir);
 
     void cancel();
 

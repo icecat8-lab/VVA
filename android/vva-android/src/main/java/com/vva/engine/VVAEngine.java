@@ -108,6 +108,12 @@ public final class VVAEngine implements AutoCloseable {
         }
     }
 
+    public void setCacheDir(String directory) {
+        synchronized (handleLock) {
+            if (handle != 0 && directory != null) nativeSetCacheDir(handle, directory);
+        }
+    }
+
     public void setTilePad(int pixels) {
         synchronized (handleLock) {
             if (handle != 0) nativeSetTilePad(handle, pixels);
@@ -328,6 +334,8 @@ public final class VVAEngine implements AutoCloseable {
     private static native float[] nativeClassifyBitmap(long handle, Bitmap bitmap, boolean premultiplied);
 
     private static native void nativeSetTileSize(long handle, int pixels);
+
+    private static native void nativeSetCacheDir(long handle, String directory);
 
     private static native void nativeSetTilePad(long handle, int pixels);
 

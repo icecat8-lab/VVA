@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version_tag:
-        description: 'Release tag (e.g. v1.2.1)'
+        description: 'Release tag (e.g. v1.3.0)'
         required: true
-        default: 'v1.2.1'
+        default: 'v1.3.0'
 
 permissions:
   contents: write
@@ -82,9 +82,9 @@ jobs:
 
       - name: Check that the binaries contain the GPU path
         run: |
+          test -f core/src/gpu/spirv_data.h || { echo "::error::spirv_data.h was not generated"; exit 1; }
           CLI="build-native/vva-cli"
           test -f "$CLI" || { echo "::error::$CLI was not found"; exit 1; }
-          test -f core/src/gpu/spirv_data.h || { echo "::error::spirv_data.h was not generated"; exit 1; }
           if strings "$CLI" | grep -q "this build has no GPU kernels"; then
             echo "::error::this build has no GPU kernels; refusing to publish a CPU-only release"
             exit 1
@@ -118,6 +118,7 @@ jobs:
           cp build-native/vva-cli dist/vva-cli-arm64-v8a
           cp build-native/libvva.so dist/libvva-arm64-v8a.so
           cp docs/FORMAT.md dist/VVA_FORMAT.md
+          cp scripts/install-termux.sh dist/install-termux.sh
           cp dist-bench/* dist/ 2>/dev/null || echo "GPU benchmark not built"
 
           LIST="$(unzip -l "dist/vva-android-$TAG.aar")"
@@ -126,7 +127,9 @@ jobs:
             *jni/arm64-v8a/libvva_engine.so*) ;;
             *) echo "::error::AAR does not contain libvva_engine.so"; exit 1 ;;
           esac
+          (cd dist && sha256sum $(ls | grep -v '^SHA256SUMS$') > SHA256SUMS)
           ls -l dist
+          cat dist/SHA256SUMS
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

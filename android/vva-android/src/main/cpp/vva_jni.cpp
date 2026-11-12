@@ -346,6 +346,19 @@ JNIEXPORT void JNICALL Java_com_vva_engine_VVAEngine_nativeSetTileSize(JNIEnv*, 
     if (Handle* h = toHandle(handle)) h->engine.setTileSize(v);
 }
 
+JNIEXPORT void JNICALL Java_com_vva_engine_VVAEngine_nativeSetCacheDir(JNIEnv* env, jclass, jlong handle, jstring dir) {
+    Handle* h = toHandle(handle);
+    if (!h || !dir) return;
+    try {
+        const char* chars = env->GetStringUTFChars(dir, nullptr);
+        if (!chars) return;
+        const std::string d(chars);
+        env->ReleaseStringUTFChars(dir, chars);
+        h->engine.setCacheDir(d);
+    } catch (...) {
+    }
+}
+
 JNIEXPORT void JNICALL Java_com_vva_engine_VVAEngine_nativeSetTilePad(JNIEnv*, jclass, jlong handle, jint v) {
     if (Handle* h = toHandle(handle)) h->engine.setTilePad(v);
 }

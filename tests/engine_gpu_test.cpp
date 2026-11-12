@@ -1,3 +1,7 @@
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -220,6 +224,30 @@ int main(int argc, char** argv) {
                       st.find(vva::gpu::convVariantName(3)) != std::string::npos,
                   ("the status says which kernels were left out and why: " + st).c_str());
             std::remove(cfgPath.c_str());
+        }
+        {
+            const std::string beside = std::string(argv[1]) + ".gpucfg";
+            const std::string dir = std::string(argv[1]) + ".cachetest";
+            std::remove(beside.c_str());
+            vva::Engine ec;
+            ec.setCacheDir(dir);
+            ec.loadModel(argv[1]);
+            attach(ec, *model, Mode(), true);
+            int found = 0;
+            if (DIR* d = ::opendir(dir.c_str())) {
+                while (dirent* ent = ::readdir(d)) {
+                    const std::string name = ent->d_name;
+                    if (name.size() > 7 && name.compare(name.size() - 7, 7, ".gpucfg") == 0) {
+                        ++found;
+                        std::remove((dir + "/" + name).c_str());
+                    }
+                }
+                ::closedir(d);
+            }
+            struct stat sb;
+            CHECK(found == 1, "the verdict goes into the folder given to setCacheDir");
+            CHECK(::stat(beside.c_str(), &sb) != 0, "nothing is written next to the model when a cache folder is set");
+            ::rmdir(dir.c_str());
         }
         vva::Engine e2;
         e2.loadModel(argv[1]);

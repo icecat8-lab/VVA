@@ -43,7 +43,8 @@ stored (fp16) file with the float32 network.
   nearest resize; channel counts must be multiples of 8). It is verified on the host against the CPU, but it
   has not been verified on real hardware yet, so it checks itself before use (see "GPU" below). There is no NPU
   backend.
-* The Android build is arm64-v8a only and requires Android 8.0 (API 26) or newer.
+* Prebuilt files are provided for 64-bit ARM phones and tablets (arm64-v8a) only. Android 8.0 (API 26) or newer is
+  required.
 
 ## Converting a model
 
@@ -103,6 +104,10 @@ VVAEngine upscaler = (c != null && c.label.equals("anime")) ? animeEngine : phot
 
 Notes:
 
+* Call `engine.setCacheDir(context.getCacheDir().getAbsolutePath())` before `init`. The first `init` on a device
+  tests the GPU against the CPU, which takes 30 to 60 seconds once; the verdict is then remembered in that folder
+  (per GPU and driver). Without a cache folder the engine writes next to the model file and, if that folder is
+  read-only, it cannot keep the verdict and leaves the GPU unused.
 * `init`, `upscale` and `classify` block, so never call them on the UI thread.
 * Create one engine per model and keep it for the lifetime of the screen.
 * `cancel()` may be called from any thread.
@@ -140,6 +145,46 @@ On the command line, `vva-cli info model.vva` prints the GPU status and `vva-cli
 chooses the device. Set `VVA_DISABLE_GPU=1` to turn the GPU path off. The GPU kernels are compiled with the NDK's
 `glslc` during the release build; a build without them runs on the CPU only.
 
+## Running in Termux (or any shell)
+
+```sh
+pkg install -y curl coreutils
+curl -fsSL https://github.com/icecat8-lab/VVA/releases/latest/download/install-termux.sh | sh
+vva-cli --version
+```
+
+The script downloads the arm64-v8a build, checks it against `SHA256SUMS` and installs it
+as `$PREFIX/bin/vva-cli`, which is already on the Termux PATH. To convert models, install the converter:
+
+```sh
+pkg install -y python python-numpy
+pip install "git+https://github.com/icecat8-lab/VVA#subdirectory=python"
+vva-convert -i model.onnx -o model.vva
+```
+
+Images are PPM files; with ImageMagick (`pkg install imagemagick`): `magick photo.jpg in.ppm`, then
+`vva-cli run model.vva in.ppm out.ppm`, then `magick out.ppm result.png`.
+
+## Does it work on my device?
+
+The engine tests the GPU on every new device and driver and only uses it when it gives the same picture as the
+CPU (within one or two levels of 8-bit colour) and is faster. Otherwise it runs on the CPU. To see what happened on
+your device run
+
+```sh
+vva-cli report model.vva
+```
+
+It prints the GPU, the speed of every kernel variant, the ones that were rejected and why, and where the GPU
+time goes. Please paste it into a "Device report" issue so the list of tested devices grows.
+
+## Models and licences
+
+VVA itself is BSD-3-Clause. A converted model keeps the licence of the network it came from: Real-ESRGAN and
+ESRGAN weights are BSD-3-Clause, but many community models on the web are CC BY-NC or similar. Check the licence
+of the weights before you redistribute a `.vva` file or ship it in an app. `vva-convert --license "..."` and
+`--author "..."` store the terms inside the file.
+
 ## Command-line tool
 
 `vva-cli` runs the same engine from Termux, `adb shell` or a Linux machine:
@@ -149,7 +194,10 @@ vva-cli info model.vva                              # check a model
 vva-cli run model.vva in.ppm out.ppm --threads 8    # upscale an image
 vva-cli classify classifier.vva in.ppm              # classify an image
 vva-cli profile model.vva 128                       # where the GPU time goes (diagnostic)
+vva-cli report model.vva                            # device report for bug reports and the compatibility list
 ```
+
+Add `--cache-dir DIR` to any command to choose where the remembered GPU test result is kept.
 
 Images use the PPM format so the tool needs no extra libraries. Convert with
 `ffmpeg -i in.png in.ppm`.
@@ -191,6 +239,8 @@ android/       Gradle module, JNI bridge, Java API
 cli/           command-line tool
 python/        converter, .vva reader and writer, numpy reference
 docs/FORMAT.md description of the .vva format
+scripts/       install-termux.sh (downloads and verifies the prebuilt vva-cli)
+tools/         shader compiler script, GPU benchmark
 tests/         host tests
 ```
 

@@ -3,7 +3,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include <stdlib.h>
 
 #include "vva/vva.h"
 
@@ -22,6 +25,7 @@ void printUsage() {
         "  vva-cli info <model.vva>                check a model and show its details\n"
         "  vva-cli run <model.vva> <in.ppm> <out.ppm> [options]   upscale with an image model\n"
         "  vva-cli profile <model.vva> [size]                     where the GPU time goes (tile of size x size, default 128)\n"
+        "  vva-cli report <model.vva>                             device report to paste into a bug report or compatibility list\n"
         "  vva-cli classify <model.vva> <in.ppm>                  classify an image with a classifier model\n"
         "\n"
         "Options for run:\n"
@@ -30,6 +34,10 @@ void printUsage() {
         "  --threads N   worker threads (default: automatic, up to 8)\n"
         "  --budget MB   working memory per tile (default: automatic from free RAM)\n"
         "  --device D    auto (default), cpu or gpu\n"
+        "\n"
+        "Options for every command that loads a model:\n"
+        "  --cache-dir D folder for the remembered GPU test result (default: next to the model if it is writable,\n"
+        "                otherwise $TMPDIR)\n"
         "\n"
         "Images are binary PPM (P6, 8 bit). Convert from/to PNG or JPEG with any\n"
         "tool, e.g.  ffmpeg -i in.png in.ppm   /   ffmpeg -i out.ppm out.png\n",
@@ -131,6 +139,37 @@ bool parseIntOption(int argc, char** argv, int& i, const char* name, int& out) {
     return true;
 }
 
+std::string g_cacheDir;
+
+void takeCacheDir(int& argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--cache-dir") != 0) continue;
+        if (i + 1 >= argc) {
+            std::fprintf(stderr, "missing value for --cache-dir\n");
+            std::exit(1);
+        }
+        g_cacheDir = argv[i + 1];
+        for (int j = i; j + 2 < argc; ++j) argv[j] = argv[j + 2];
+        argc -= 2;
+        --i;
+    }
+}
+
+const char* buildTarget() {
+#if defined(__aarch64__)
+    const char* arch = "arm64-v8a";
+#elif defined(__arm__)
+    const char* arch = "armeabi-v7a";
+#elif defined(__x86_64__)
+    const char* arch = "x86_64";
+#elif defined(__i386__)
+    const char* arch = "x86";
+#else
+    const char* arch = "unknown cpu";
+#endif
+    return arch;
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -138,6 +177,7 @@ int main(int argc, char** argv) {
         printUsage();
         return 1;
     }
+    takeCacheDir(argc, argv);
 
     if (std::strcmp(argv[1], "--version") == 0) {
         std::printf("vva-cli %s\n", VVA_VERSION);
@@ -156,6 +196,7 @@ int main(int argc, char** argv) {
 
     if (std::strcmp(argv[1], "info") == 0 && argc == 3) {
         vva::Engine engine;
+        if (!g_cacheDir.empty()) engine.setCacheDir(g_cacheDir);
         if (!engine.loadModel(argv[2])) {
             std::fprintf(stderr, "error: %s\n", engine.lastError().c_str());
             return 1;
@@ -174,6 +215,7 @@ int main(int argc, char** argv) {
 
     if (std::strcmp(argv[1], "profile") == 0 && (argc == 3 || argc == 4)) {
         vva::Engine engine;
+        if (!g_cacheDir.empty()) engine.setCacheDir(g_cacheDir);
         if (!engine.loadModel(argv[2])) {
             std::fprintf(stderr, "error: %s\n", engine.lastError().c_str());
             return 1;
@@ -184,8 +226,34 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (std::strcmp(argv[1], "report") == 0 && argc == 3) {
+        vva::Engine engine;
+        std::string fresh = g_cacheDir;
+        if (fresh.empty()) {
+            const char* tmp = std::getenv("TMPDIR");
+            std::string pattern = std::string(tmp && *tmp ? tmp : "/tmp") + "/vva-report-XXXXXX";
+            std::vector<char> buf(pattern.begin(), pattern.end());
+            buf.push_back('\0');
+            if (::mkdtemp(buf.data())) fresh = buf.data();
+        }
+        if (!fresh.empty()) engine.setCacheDir(fresh);
+        std::printf("VVA device report\n");
+        std::printf("vva-cli %s, %s, %u cpu threads\n", VVA_VERSION, buildTarget(), std::thread::hardware_concurrency());
+        if (engine.hasVulkan()) std::printf("Vulkan: available, %s\n", engine.vulkanDeviceName().c_str());
+        else std::printf("Vulkan: NOT available\n");
+        if (!engine.loadModel(argv[2])) {
+            std::fprintf(stderr, "error: %s\n", engine.lastError().c_str());
+            return 1;
+        }
+        std::printf("model: %s\nscale: x%d\n", engine.modelName().c_str(), engine.scale());
+        std::printf("gpu: %s\n", engine.gpuStatus().c_str());
+        if (engine.gpuActive()) std::printf("%s", engine.gpuProfile(128, 128).c_str());
+        return 0;
+    }
+
     if (std::strcmp(argv[1], "classify") == 0 && argc == 4) {
         vva::Engine engine;
+        if (!g_cacheDir.empty()) engine.setCacheDir(g_cacheDir);
         if (!engine.loadModel(argv[2])) {
             std::fprintf(stderr, "error: %s\n", engine.lastError().c_str());
             return 1;
@@ -233,6 +301,7 @@ int main(int argc, char** argv) {
         }
 
         vva::Engine engine;
+        if (!g_cacheDir.empty()) engine.setCacheDir(g_cacheDir);
         if (!engine.loadModel(argv[2])) {
             std::fprintf(stderr, "error: %s\n", engine.lastError().c_str());
             return 1;

@@ -266,7 +266,43 @@ public:
     std::atomic<bool> cancelFlag{false};
 
     std::string modelPath;
+    std::string cacheDir;
     int classifierSize = 0;
+
+    static std::string baseName(const std::string& path) {
+        const size_t slash = path.find_last_of('/');
+        return slash == std::string::npos ? path : path.substr(slash + 1);
+    }
+
+    static std::string dirName(const std::string& path) {
+        const size_t slash = path.find_last_of('/');
+        if (slash == std::string::npos) return ".";
+        return slash == 0 ? std::string("/") : path.substr(0, slash);
+    }
+
+    static std::string pathHash(const std::string& path) {
+        uint64_t h = 1469598103934665603ull;
+        for (unsigned char c : path) {
+            h ^= c;
+            h *= 1099511628211ull;
+        }
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), "%08x", static_cast<unsigned>(h ^ (h >> 32)));
+        return buf;
+    }
+
+    std::string cacheBase(const std::string& path) const {
+        std::string dir = cacheDir;
+        if (dir.empty()) {
+            if (::access(dirName(path).c_str(), W_OK) == 0) return path;
+            const char* tmp = std::getenv("TMPDIR");
+            dir = (tmp && *tmp) ? tmp : "/tmp";
+        } else {
+            ::mkdir(dir.c_str(), 0700);
+        }
+        if (::access(dir.c_str(), W_OK) != 0) return std::string();
+        return dir + "/" + baseName(path) + "-" + pathHash(path);
+    }
 
     int tileSize = 0;
     int tilePad = 16;
@@ -485,7 +521,8 @@ public:
 
     void finishGpuSetup(bool checkSpeed) {
         const std::string identity = gpuBackend->identity();
-        const std::string cachePath = (checkSpeed && !modelPath.empty()) ? modelPath + ".gpucfg" : std::string();
+        const std::string cacheStem = (checkSpeed && !modelPath.empty()) ? cacheBase(modelPath) : std::string();
+        const std::string cachePath = cacheStem.empty() ? std::string() : cacheStem + ".gpucfg";
         GpuConfig cfg;
         bool cached = false;
         if (!cachePath.empty()) {
@@ -542,7 +579,12 @@ public:
         gpuState = "this build has no Vulkan support";
         (void)modelPath;
 #else
-        const std::string marker = modelPath + ".gpuprobe";
+        const std::string markerStem = cacheBase(modelPath);
+        if (markerStem.empty()) {
+            gpuState = "skipped: nowhere to keep the GPU test result; call setCacheDir() with a writable folder";
+            return;
+        }
+        const std::string marker = markerStem + ".gpuprobe";
         struct stat st;
         if (::stat(marker.c_str(), &st) == 0) {
             const double age = std::difftime(std::time(nullptr), st.st_mtime);
@@ -840,6 +882,8 @@ public:
 
 Engine::Engine() : pimpl(new Impl()) {}
 Engine::~Engine() = default;
+
+void Engine::setCacheDir(const std::string& dir) { pimpl->cacheDir = dir; }
 
 bool Engine::loadModel(const std::string& modelPath) {
     try {
