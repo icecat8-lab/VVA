@@ -47,7 +47,7 @@ bool fail(std::string* s, const std::string& m) {
 
 size_t roundUp(size_t v, size_t m) { return (v + m - 1) / m * m; }
 
-enum class PKind { Conv, Leaky, MulS, Add, Concat, Resize };
+enum class PKind { Conv, Leaky, MulS, Add, Concat, Resize, PReLU, Shuffle };
 
 struct Prim {
     PKind kind = PKind::Add;
@@ -57,6 +57,7 @@ struct Prim {
     int sh = 1, sw = 1;
     int cin = 0, cout = 0;
     int weightIndex = -1;
+    std::vector<float> slopes;
     bool dead = false;
 };
 
@@ -65,9 +66,11 @@ struct ConvData {
     size_t offset = 0;
     size_t floats = 0;
     int biasVec4 = 0;
+    int slopeVec4 = 0;
+    int k = 3;
 };
 
-enum class OKind { Conv, Elt, Concat, Resize };
+enum class OKind { Conv, Elt, Concat, Resize, Shuffle };
 
 struct Op {
     OKind kind = OKind::Elt;
@@ -77,6 +80,7 @@ struct Op {
     float alpha = 1.f, scale = 1.f;
     int res = -1;
     int sh = 1, sw = 1;
+    bool prelu = false;
 };
 
 struct Tensor {
@@ -209,19 +213,22 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
                 return nullptr;
             }
             const TensorInfo& wt = *wIt->second;
-            if (wt.shape[2] != 3 || wt.shape[3] != 3 || attrInt("groups", 1) != 1 || !pairIs("stride", 1, 1, 1, 1) ||
-                !pairIs("padding", 0, 0, 1, 1) || !pairIs("dilation", 1, 1, 1, 1)) {
-                fail(reason, "only 3x3 convolutions with stride 1, padding 1 and no groups run on the GPU");
+            const int kk = static_cast<int>(wt.shape[2]);
+            if (wt.shape[3] != kk || kk % 2 == 0 || kk < 1 || kk > 11 || attrInt("groups", 1) != 1 ||
+                !pairIs("stride", 1, 1, 1, 1) || !pairIs("padding", 0, 0, kk / 2, kk / 2) || !pairIs("dilation", 1, 1, 1, 1)) {
+                fail(reason, "only odd KxK convolutions (K up to 11) with stride 1, same padding and no groups run on the GPU");
                 return nullptr;
             }
             ConvData cd;
+            cd.k = kk;
             cd.cout = static_cast<int>(wt.shape[0]);
             cd.cin = static_cast<int>(wt.shape[1]);
             if (cd.cin != channels[static_cast<size_t>(x)]) {
                 fail(reason, "convolution input channels do not match");
                 return nullptr;
             }
-            std::vector<float> w(static_cast<size_t>(cd.cout) * cd.cin * 9);
+            const int taps = kk * kk;
+            std::vector<float> w(static_cast<size_t>(cd.cout) * cd.cin * static_cast<size_t>(taps));
             const uint8_t* data = model.tensorData(wt);
             for (size_t i = 0; i < w.size(); ++i) {
                 if (wt.dtype == DType::F32) {
@@ -251,18 +258,19 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
                 }
             }
             const int ob = (cd.cout + 7) / 8;
-            const size_t packed = static_cast<size_t>(ob) * cd.cin * 9 * 8;
+            const size_t packed = static_cast<size_t>(ob) * cd.cin * static_cast<size_t>(taps) * 8;
             cd.offset = roundUp(im.weights.size(), 64);
             cd.biasVec4 = static_cast<int>(packed / 4);
-            cd.floats = packed + static_cast<size_t>(ob) * 8;
+            cd.slopeVec4 = static_cast<int>((packed + static_cast<size_t>(ob) * 8) / 4);
+            cd.floats = packed + static_cast<size_t>(ob) * 16;
             im.weights.resize(cd.offset + roundUp(cd.floats, 64), 0.f);
             for (int o = 0; o < ob; ++o) {
                 for (int ic = 0; ic < cd.cin; ++ic) {
-                    for (int tap = 0; tap < 9; ++tap) {
+                    for (int tap = 0; tap < taps; ++tap) {
                         for (int j = 0; j < 8; ++j) {
                             const int oc = o * 8 + j;
-                            const size_t dst = cd.offset + ((static_cast<size_t>(o) * cd.cin + ic) * 9 + tap) * 8 + j;
-                            im.weights[dst] = oc < cd.cout ? w[(static_cast<size_t>(oc) * cd.cin + ic) * 9 + tap] : 0.f;
+                            const size_t dst = cd.offset + ((static_cast<size_t>(o) * cd.cin + ic) * static_cast<size_t>(taps) + tap) * 8 + j;
+                            im.weights[dst] = oc < cd.cout ? w[(static_cast<size_t>(oc) * cd.cin + ic) * static_cast<size_t>(taps) + tap] : 0.f;
                         }
                     }
                 }
@@ -290,6 +298,43 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
                 const json::Value* a = n.attrs.find("alpha");
                 p.value = (a && a->isNumber()) ? static_cast<float>(a->number) : 0.01f;
             }
+        } else if (n.op == "PReLU") {
+            const int x = n.inputs.size() == 2 ? valueId(n.inputs[0]) : -1;
+            auto sIt = n.inputs.size() == 2 ? constants.find(n.inputs[1]) : constants.end();
+            if (x < 0 || sIt == constants.end()) {
+                fail(reason, "PReLU needs an activation and a constant slope");
+                return nullptr;
+            }
+            const TensorInfo& st = *sIt->second;
+            size_t count = 1;
+            for (int64_t d : st.shape) count *= static_cast<size_t>(d);
+            if (count != 1 && count != static_cast<size_t>(channels[static_cast<size_t>(x)])) {
+                fail(reason, "PReLU slope does not match the channel count");
+                return nullptr;
+            }
+            p.slopes.resize(count);
+            const uint8_t* sd = model.tensorData(st);
+            for (size_t i = 0; i < count; ++i) {
+                if (st.dtype == DType::F32) {
+                    std::memcpy(&p.slopes[i], sd + 4 * i, 4);
+                } else {
+                    uint16_t h;
+                    std::memcpy(&h, sd + 2 * i, 2);
+                    p.slopes[i] = halfBitsToFloat(h);
+                }
+            }
+            p.kind = PKind::PReLU;
+            p.in = {x};
+        } else if (n.op == "PixelShuffle") {
+            const int x = n.inputs.size() == 1 ? valueId(n.inputs[0]) : -1;
+            const int r = attrInt("upscale", 0);
+            if (x < 0 || r < 1 || r > 16 || channels[static_cast<size_t>(x)] % (r * r) != 0) {
+                fail(reason, "bad PixelShuffle");
+                return nullptr;
+            }
+            p.kind = PKind::Shuffle;
+            p.in = {x};
+            p.sh = r;
         } else if (n.op == "Mul") {
             const json::Value* s = n.attrs.find("scalar");
             const int x = n.inputs.size() == 1 ? valueId(n.inputs[0]) : -1;
@@ -351,6 +396,7 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
         int oc = 0;
         switch (p.kind) {
             case PKind::Conv: oc = p.cout; break;
+            case PKind::Shuffle: oc = channels[static_cast<size_t>(p.in[0])] / (p.sh * p.sh); break;
             case PKind::Concat:
                 for (int id : p.in) oc += channels[static_cast<size_t>(id)];
                 break;
@@ -411,6 +457,14 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
                 if ((q.kind == PKind::Leaky) && !act && !scaled && !hasRes) {
                     op.alpha = q.value;
                     act = true;
+                } else if (q.kind == PKind::PReLU && !act && !scaled && !hasRes) {
+                    ConvData& cdp = im.convs[static_cast<size_t>(op.conv)];
+                    for (int j2 = 0; j2 < cdp.cout; ++j2) {
+                        im.weights[cdp.offset + static_cast<size_t>(cdp.slopeVec4) * 4 + static_cast<size_t>(j2)] =
+                            q.slopes[q.slopes.size() == 1 ? 0 : static_cast<size_t>(j2)];
+                    }
+                    op.prelu = true;
+                    act = true;
                 } else if (q.kind == PKind::MulS && !scaled && !hasRes) {
                     op.scale = q.value;
                     scaled = true;
@@ -456,6 +510,14 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
             op.kind = OKind::Concat;
             op.in = p.in;
             op.out = p.out;
+        } else if (p.kind == PKind::PReLU) {
+            fail(reason, "PReLU runs on the GPU only directly after a convolution");
+            return nullptr;
+        } else if (p.kind == PKind::Shuffle) {
+            op.kind = OKind::Shuffle;
+            op.in = p.in;
+            op.out = p.out;
+            op.sh = p.sh;
         } else {
             op.kind = OKind::Resize;
             op.in = p.in;
@@ -486,17 +548,18 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
         auto need8 = [&](int t) {
             return im.tensors[static_cast<size_t>(t)].c % 8 == 0;
         };
-        if (op.kind != OKind::Conv) {
+        if (op.kind == OKind::Concat) {
             for (int t : op.in) {
                 if (!need8(t)) {
-                    fail(reason, "channel counts must be multiples of 8 around element-wise, concat and resize operators");
+                    fail(reason, "channel counts must be multiples of 8 around concat operators");
                     return nullptr;
                 }
             }
             if (!need8(op.out)) {
-                fail(reason, "channel counts must be multiples of 8 around element-wise, concat and resize operators");
+                fail(reason, "channel counts must be multiples of 8 around concat operators");
                 return nullptr;
             }
+        } else if (op.kind != OKind::Conv) {
         } else if (op.res >= 0 && !need8(op.res)) {
             fail(reason, "a fused residual needs a multiple of 8 channels");
             return nullptr;
@@ -506,10 +569,23 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
     im.inputTensor = 0;
     im.outputTensor = outputTensor;
     im.outC = im.tensors[static_cast<size_t>(outputTensor)].c;
-    int scaleNum = 1;
+    std::vector<int> factor(static_cast<size_t>(numTensors), 1);
     for (const Op& op : ops) {
-        if (op.kind == OKind::Resize) scaleNum *= op.sh;
+        int f = factor[static_cast<size_t>(op.in[0])];
+        for (int t : op.in) {
+            if (factor[static_cast<size_t>(t)] != f) {
+                fail(reason, "operands with different scale factors");
+                return nullptr;
+            }
+        }
+        if (op.res >= 0 && factor[static_cast<size_t>(op.res)] != f) {
+            fail(reason, "a residual with a different scale factor");
+            return nullptr;
+        }
+        if (op.kind == OKind::Resize || op.kind == OKind::Shuffle) f *= op.sh;
+        factor[static_cast<size_t>(op.out)] = f;
     }
+    const int scaleNum = factor[static_cast<size_t>(outputTensor)];
     im.scale = scaleNum;
     if (ops.empty()) {
         fail(reason, "empty graph");
@@ -537,6 +613,9 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
         if (op.kind == OKind::Resize) {
             out.h = a.h * op.sh;
             out.w = a.w * op.sw;
+        } else if (op.kind == OKind::Shuffle) {
+            out.h = a.h * op.sh;
+            out.w = a.w * op.sh;
         } else {
             out.h = a.h;
             out.w = a.w;
@@ -573,18 +652,96 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
     };
     auto release = [&](int t) { classes[geometry(t)].release(rel[static_cast<size_t>(t)], bytes(t)); };
 
-    allocate(im.inputTensor);
+    std::vector<int> aliasParent(tensors.size(), -1);
+    std::vector<size_t> aliasChan8(tensors.size(), 0);
+    std::vector<bool> isRoot(tensors.size(), false);
+    std::vector<bool> skipOp(im.ops.size(), false);
+    {
+        std::vector<size_t> concats;
+        for (size_t k = 0; k < im.ops.size(); ++k) {
+            if (im.ops[k].kind == OKind::Concat) concats.push_back(k);
+        }
+        std::stable_sort(concats.begin(), concats.end(),
+                         [&](size_t a, size_t b) { return im.ops[a].in.size() > im.ops[b].in.size(); });
+        auto chunks = [&](int t) { return static_cast<size_t>((tensors[static_cast<size_t>(t)].c + 7) / 8); };
+        for (size_t k : concats) {
+            const Op& op = im.ops[k];
+            const int out = op.out;
+            if (out == im.outputTensor || out == im.inputTensor || aliasParent[static_cast<size_t>(out)] >= 0 ||
+                isRoot[static_cast<size_t>(out)]) {
+                continue;
+            }
+            bool distinct = true;
+            for (size_t a = 0; a < op.in.size() && distinct; ++a) {
+                for (size_t b = a + 1; b < op.in.size(); ++b) {
+                    if (op.in[a] == op.in[b]) distinct = false;
+                }
+            }
+            if (!distinct) continue;
+            bool allFree = true;
+            for (int t : op.in) {
+                const size_t ti = static_cast<size_t>(t);
+                if (t == im.inputTensor || t == im.outputTensor || aliasParent[ti] >= 0 || isRoot[ti]) allFree = false;
+            }
+            if (allFree) {
+                isRoot[static_cast<size_t>(out)] = true;
+                size_t at = 0;
+                for (int t : op.in) {
+                    aliasParent[static_cast<size_t>(t)] = out;
+                    aliasChan8[static_cast<size_t>(t)] = at;
+                    at += chunks(t);
+                }
+                skipOp[k] = true;
+                continue;
+            }
+            const int parent = aliasParent[static_cast<size_t>(op.in[0])];
+            if (parent < 0) continue;
+            bool prefix = true;
+            size_t at = aliasChan8[static_cast<size_t>(op.in[0])];
+            for (int t : op.in) {
+                if (aliasParent[static_cast<size_t>(t)] != parent || aliasChan8[static_cast<size_t>(t)] != at) {
+                    prefix = false;
+                    break;
+                }
+                at += chunks(t);
+            }
+            if (prefix) {
+                aliasParent[static_cast<size_t>(out)] = parent;
+                aliasChan8[static_cast<size_t>(out)] = aliasChan8[static_cast<size_t>(op.in[0])];
+                skipOp[k] = true;
+            }
+        }
+    }
+    auto owner = [&](int t) { return aliasParent[static_cast<size_t>(t)] >= 0 ? aliasParent[static_cast<size_t>(t)] : t; };
+    std::vector<int> groupLast(tensors.size(), -1);
+    for (size_t t = 0; t < tensors.size(); ++t) {
+        const int r = owner(static_cast<int>(t));
+        groupLast[static_cast<size_t>(r)] = std::max(groupLast[static_cast<size_t>(r)], tensors[t].lastUse);
+    }
+    std::vector<bool> released(tensors.size(), false);
+    auto ensure = [&](int t) {
+        const int r = owner(t);
+        if (!allocated[static_cast<size_t>(r)]) allocate(r);
+    };
+
+    ensure(im.inputTensor);
     for (size_t k = 0; k < im.ops.size(); ++k) {
+        if (skipOp[k]) continue;
         const Op& op = im.ops[k];
-        allocate(op.out);
+        ensure(op.out);
         std::vector<int> touched = op.in;
         if (op.res >= 0) touched.push_back(op.res);
+        touched.push_back(op.out);
         std::sort(touched.begin(), touched.end());
         touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
         for (int t : touched) {
-            if (tensors[static_cast<size_t>(t)].lastUse == static_cast<int>(k) && t != im.outputTensor) release(t);
+            const int r = owner(t);
+            if (r == im.outputTensor || released[static_cast<size_t>(r)] || !allocated[static_cast<size_t>(r)]) continue;
+            if (groupLast[static_cast<size_t>(r)] <= static_cast<int>(k)) {
+                release(r);
+                released[static_cast<size_t>(r)] = true;
+            }
         }
-        if (tensors[static_cast<size_t>(op.out)].lastUse < static_cast<int>(k)) release(op.out);
     }
     std::unordered_map<uint64_t, size_t> base;
     size_t cursor = 0;
@@ -597,7 +754,12 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
         base[key] = cursor;
         cursor += ca.top;
     }
-    auto offset = [&](int t) { return base[geometry(t)] + rel[static_cast<size_t>(t)]; };
+    auto offset = [&](int t) {
+        const int r = owner(t);
+        size_t o = base[geometry(r)] + rel[static_cast<size_t>(r)];
+        if (r != t) o += aliasChan8[static_cast<size_t>(t)] * 8 * plane(t) * static_cast<size_t>(eb);
+        return o;
+    };
     prog.arenaBytes = roundUp(cursor, 256) + 256;
 
     double sinceBoundary = 0.0;
@@ -626,19 +788,23 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
         }
     };
 
-    for (const Op& op : im.ops) {
+    for (size_t opIndex = 0; opIndex < im.ops.size(); ++opIndex) {
+        if (skipOp[opIndex]) continue;
+        const Op& op = im.ops[opIndex];
         if (op.kind == OKind::Conv) {
             const ConvData& cd = im.convs[static_cast<size_t>(op.conv)];
             const Tensor& tin = tensors[static_cast<size_t>(op.in[0])];
             const int cout8 = (cd.cout + 7) / 8 * 8;
-            const double rowFlops = 2.0 * cd.cin * cout8 * 9.0 * tin.w;
+            const double rowFlops = 2.0 * cd.cin * cout8 * static_cast<double>(cd.k) * cd.k * tin.w;
             int rows = static_cast<int>(gDispatchFlops / std::max(rowFlops, 1.0));
             rows = std::max(4, rows / 4 * 4);
             for (int y0 = 0; y0 < tin.h; y0 += rows) {
                 const int n = std::min(rows, tin.h - y0);
                 Command cmd;
                 cmd.type = Command::kDispatch;
-                cmd.kernel = convKernel(convVariant);
+                const bool generic = cd.k != 3;
+                cmd.kernel = generic ? (half ? Kernel::ConvK_F16 : Kernel::ConvK) : convKernel(convVariant);
+                cmd.push.j[0] = cd.k;
                 cmd.push.i[0] = cd.cin;
                 cmd.push.i[1] = tin.h;
                 cmd.push.i[2] = tin.w;
@@ -646,6 +812,7 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
                 cmd.push.i[4] = y0;
                 cmd.push.i[5] = op.res >= 0 ? 1 : 0;
                 cmd.push.i[6] = static_cast<int32_t>(plane(op.in[0]));
+                cmd.push.i[7] = op.prelu ? cd.slopeVec4 : 0;
                 cmd.push.f[0] = op.alpha;
                 cmd.push.f[1] = op.scale;
                 cmd.bind[0] = bindArenaSlack(op.in[0]);
@@ -654,10 +821,10 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
                 cmd.bind[1].size = cd.floats * static_cast<size_t>(eb);
                 cmd.bind[2] = bindArena(op.out);
                 cmd.bind[3] = op.res >= 0 ? bindArena(op.res) : bindArena(op.in[0]);
-                const int pixelsPer = convVariant == 2 ? 8 : 4;
+                const int pixelsPer = generic ? 1 : variantPixels(convVariant);
                 cmd.gx = static_cast<uint32_t>((((tin.w + pixelsPer - 1) / pixelsPer) + 15) / 16);
                 cmd.gy = static_cast<uint32_t>((n + 3) / 4);
-                cmd.gz = static_cast<uint32_t>(cout8 / (convVariant == 1 ? 4 : 8));
+                cmd.gz = static_cast<uint32_t>(cout8 / (generic ? 8 : variantChannels(convVariant)));
                 cmd.flops = rowFlops * n;
                 prog.maxBindBytes = std::max(prog.maxBindBytes, cmd.bind[1].size);
                 push(cmd);
@@ -695,6 +862,27 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
                 channelOffset += c8(t);
                 push(cmd);
             }
+        } else if (op.kind == OKind::Shuffle) {
+            const Tensor& tin = tensors[static_cast<size_t>(op.in[0])];
+            const Tensor& tout = tensors[static_cast<size_t>(op.out)];
+            Command cmd;
+            cmd.type = Command::kDispatch;
+            cmd.kernel = half ? Kernel::Shuffle_F16 : Kernel::Shuffle;
+            cmd.push.i[0] = tin.h;
+            cmd.push.i[1] = tin.w;
+            cmd.push.i[2] = op.sh;
+            cmd.push.i[3] = tout.c;
+            cmd.push.i[4] = static_cast<int32_t>(plane(op.in[0]));
+            cmd.push.i[5] = static_cast<int32_t>(plane(op.out));
+            cmd.bind[0] = bindArena(op.in[0]);
+            cmd.bind[1] = cmd.bind[0];
+            cmd.bind[2] = bindArena(op.out);
+            cmd.bind[3] = cmd.bind[2];
+            cmd.gx = static_cast<uint32_t>((tout.w + 15) / 16);
+            cmd.gy = static_cast<uint32_t>((tout.h + 3) / 4);
+            cmd.gz = static_cast<uint32_t>(tout.c);
+            cmd.flops = static_cast<double>(tout.c) * tout.h * tout.w;
+            push(cmd);
         } else {
             const Tensor& tin = tensors[static_cast<size_t>(op.in[0])];
             const Tensor& tout = tensors[static_cast<size_t>(op.out)];

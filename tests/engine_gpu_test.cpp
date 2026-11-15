@@ -185,7 +185,7 @@ int main(int argc, char** argv) {
         e.setTileSize(16);
         e.setTilePad(8);
         Mode m;
-        m.failOnCall = 3 + 3;
+        m.failOnCall = vva::gpu::kConvVariants + 3;
         m.deviceLost = lost == 1;
         EmuBackend* b = attach(e, *model, m);
         CHECK(e.gpuActive(), "backend adopted before the failure");

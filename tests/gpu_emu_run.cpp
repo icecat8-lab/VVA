@@ -44,8 +44,10 @@ int main(int argc, char** argv) {
             std::printf("EMU_ERROR: %s\n", err.c_str());
             return false;
         }
-        std::printf("OK out=%dx%d commands=%zu arena=%zu flops=%.3g\n", prog.outH, prog.outW, prog.commands.size(),
-                    prog.arenaBytes, prog.flops);
+        size_t copies = 0;
+        for (const vva::gpu::Command& c : prog.commands) copies += c.type == vva::gpu::Command::kCopy ? 1 : 0;
+        std::printf("OK out=%dx%d commands=%zu copies=%zu arena=%zu flops=%.3g\n", prog.outH, prog.outW, prog.commands.size(),
+                    copies, prog.arenaBytes, prog.flops);
         return true;
     };
     if (argc == 9) {

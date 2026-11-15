@@ -142,7 +142,7 @@ def main():
         T.check(got2 is not None and got is not None and np.array_equal(got, got2), "%dx%d: a previous image of another size leaves no trace" % (h, w))
 
     print("== every convolution kernel variant against numpy ==")
-    for variant in (0, 1, 2, 3, 4):
+    for variant in range(7):
         tol = 5e-5 if variant < 3 else 4e-3
         for nf, gc, nb, h, w, seed in ((16, 8, 1, 7, 21, 31), (8, 8, 1, 1, 1, 32), (16, 8, 1, 5, 40, 33), (16, 8, 2, 17, 9, 34)):
             sd = make_rrdbnet_state(nf, gc, nb, seed=seed)
@@ -204,6 +204,76 @@ def main():
                 e = rel(got.astype(np.float64), want) if got.size == want.size else -1
                 T.check(0 <= e < 5e-5, "%s %dx%d matches numpy (rel err %.1e)" % (name, h, w, e))
 
+    print("== compact models, large kernels, PReLU and PixelShuffle on the GPU ==")
+    rng3 = np.random.RandomState(21)
+
+    def srvgg_like(nf, nc, up):
+        w = VVAWriter(name="srvgg", scale=up)
+        w.add_input("input", [1, 3, -1, -1])
+        prev, idx = "input", 0
+        w.add_tensor("w0", rnd(rng3, nf, 3, 3, 3), "f32")
+        w.add_tensor("b0", rnd(rng3, nf), "f32")
+        w.add_node("Conv2D", [prev, "w0", "b0"], ["c0"], {"padding": [1, 1]})
+        w.add_tensor("s0", (0.1 + rng3.rand(nf) * 0.3).astype(np.float32), "f32")
+        w.add_node("PReLU", ["c0", "s0"], ["a0"])
+        prev = "a0"
+        for i in range(1, nc + 1):
+            w.add_tensor("w%d" % i, rnd(rng3, nf, nf, 3, 3), "f32")
+            w.add_tensor("b%d" % i, rnd(rng3, nf), "f32")
+            w.add_node("Conv2D", [prev, "w%d" % i, "b%d" % i], ["c%d" % i], {"padding": [1, 1]})
+            w.add_tensor("s%d" % i, (0.1 + rng3.rand(1) * 0.3).astype(np.float32), "f32")
+            w.add_node("PReLU", ["c%d" % i, "s%d" % i], ["a%d" % i])
+            prev = "a%d" % i
+        w.add_tensor("wl", rnd(rng3, 3 * up * up, nf, 3, 3), "f32")
+        w.add_tensor("bl", rnd(rng3, 3 * up * up), "f32")
+        w.add_node("Conv2D", [prev, "wl", "bl"], ["cl"], {"padding": [1, 1]})
+        w.add_node("PixelShuffle", ["cl"], ["shuffled"], {"upscale": up})
+        w.add_node("ResizeNearest", ["input"], ["base"], {"scale": [up, up]})
+        w.add_node("Add", ["shuffled", "base"], ["output"])
+        w.add_output("output", [1, 3, -1, -1])
+        return w
+
+    def espcn_like(up, nf, k1, k2, k3):
+        w = VVAWriter(name="espcn", scale=up)
+        w.add_input("input", [1, 3, -1, -1])
+        w.add_tensor("w1", rnd(rng3, nf, 3, k1, k1), "f32")
+        w.add_tensor("b1", rnd(rng3, nf), "f32")
+        w.add_node("Conv2D", ["input", "w1", "b1"], ["c1"], {"padding": [k1 // 2, k1 // 2]})
+        w.add_node("ReLU", ["c1"], ["a1"])
+        w.add_tensor("w2", rnd(rng3, nf, nf, k2, k2), "f32")
+        w.add_tensor("b2", rnd(rng3, nf), "f32")
+        w.add_node("Conv2D", ["a1", "w2", "b2"], ["c2"], {"padding": [k2 // 2, k2 // 2]})
+        w.add_node("ReLU", ["c2"], ["a2"])
+        w.add_tensor("w3", rnd(rng3, 3 * up * up, nf, k3, k3), "f32")
+        w.add_tensor("b3", rnd(rng3, 3 * up * up), "f32")
+        w.add_node("Conv2D", ["a2", "w3", "b3"], ["c3"], {"padding": [k3 // 2, k3 // 2]})
+        w.add_node("PixelShuffle", ["c3"], ["output"], {"upscale": up})
+        w.add_output("output", [1, 3, -1, -1])
+        return w
+
+    cases = [("SRVGGNetCompact-like x4", srvgg_like(16, 2, 4), 7, 9), ("SRVGGNetCompact-like x2", srvgg_like(24, 3, 2), 8, 11),
+             ("ESPCN-like 5/3/3 x2", espcn_like(2, 16, 5, 3, 3), 9, 13), ("ESPCN-like 7/1/5 x3", espcn_like(3, 8, 7, 1, 5), 6, 10),
+             ("ESPCN-like 9/1/11 x4", espcn_like(4, 16, 9, 1, 11), 7, 7)]
+    for label, writer, h, wd in cases:
+        path = os.path.join(WORK, "gp_arch.vva")
+        writer.save(path)
+        meta, stored = read_vva(path)
+        deq = {k: np.asarray(v, dtype=np.float64) for k, v in stored.items()}
+        x = np.random.RandomState(h * 7 + wd).rand(3, h, wd).astype(np.float32)
+        want = run_graph(meta, deq, x.astype(np.float64)).reshape(-1)
+        for variant in range(7):
+            text, got = emu(exe, path, x, variant=variant)
+            tol = 5e-5 if variant < 3 else 4e-3
+            T.check(got is not None and got.size == want.size and rel(got.astype(np.float64), want) < tol,
+                    "%s runs on the GPU, variant %d matches numpy (%s)" % (label, variant, text[:80] if got is None else ""))
+
+    print("== dense blocks share one buffer instead of copying ==")
+    sd = make_rrdbnet_state(16, 8, 2, seed=77)
+    path = os.path.join(WORK, "gp_dense.vva")
+    convert(save_npz(sd, "gp_dense"), path, name="t", log=lambda *_: None)
+    text, got = emu(exe, path, np.random.RandomState(1).rand(3, 9, 9).astype(np.float32))
+    T.check(got is not None and "copies=0" in text, "no concat copy commands remain (%s)" % text[-80:])
+
     print("== models the GPU path must refuse (they stay on the CPU) ==")
     rng2 = np.random.RandomState(8)
 
@@ -215,10 +285,10 @@ def main():
 
     w = VVAWriter(name="r", scale=1)
     w.add_input("input", [1, 3, -1, -1])
-    w.add_tensor("w", rnd(rng2, 8, 3, 1, 1), "f32")
+    w.add_tensor("w", rnd(rng2, 8, 3, 2, 2), "f32")
     w.add_node("Conv2D", ["input", "w"], ["output"], {})
     w.add_output("output", [1, 8, -1, -1])
-    refuse("1x1 convolution", w, "3x3")
+    refuse("2x2 convolution", w, "odd KxK")
 
     w = VVAWriter(name="r", scale=1)
     w.add_input("input", [1, 3, -1, -1])
@@ -235,9 +305,17 @@ def main():
 
     w = VVAWriter(name="r", scale=1)
     w.add_input("input", [1, 3, -1, -1])
-    w.add_node("ReLU", ["input"], ["output"])
+    w.add_node("ReLU", ["input"], ["r"])
+    w.add_node("Concat", ["input", "r"], ["output"], {"axis": 1})
+    w.add_output("output", [1, 6, -1, -1])
+    refuse("concat of 3 channel tensors", w, "multiples of 8")
+
+    w = VVAWriter(name="r", scale=1)
+    w.add_input("input", [1, 3, -1, -1])
+    w.add_tensor("slope", np.array([0.2, 0.3, 0.4], dtype=np.float32), "f32")
+    w.add_node("PReLU", ["input", "slope"], ["output"])
     w.add_output("output", [1, 3, -1, -1])
-    refuse("element-wise on 3 channels", w, "multiples of 8")
+    refuse("PReLU that does not follow a convolution", w, "directly after a convolution")
 
     w = VVAWriter(name="r", scale=1)
     w.add_input("input", [1, 3, -1, -1])

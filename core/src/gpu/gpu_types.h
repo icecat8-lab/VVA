@@ -10,11 +10,12 @@ namespace gpu {
 
 enum class Kernel : int {
     Conv3x3 = 0, Eltwise = 1, Resize = 2, Conv3x3_4oc = 3, Conv3x3_8px = 4,
-    Conv3x3_F16 = 5, Conv3x3_F16Math = 6, Eltwise_F16 = 7, Resize_F16 = 8
+    Conv3x3_F16 = 5, Conv3x3_F16Math = 6, Eltwise_F16 = 7, Resize_F16 = 8, Shuffle = 9, Shuffle_F16 = 10,
+    Conv3x3_4oc_F16 = 11, Conv3x3_8px_F16 = 12, ConvK = 13, ConvK_F16 = 14
 };
 
-constexpr int kKernelCount = 9;
-constexpr int kConvVariants = 5;
+constexpr int kKernelCount = 15;
+constexpr int kConvVariants = 7;
 
 inline bool variantIsHalf(int variant) { return variant >= 3; }
 inline int variantElemBytes(int variant) { return variantIsHalf(variant) ? 2 : 4; }
@@ -25,19 +26,26 @@ inline Kernel convKernel(int variant) {
         case 2: return Kernel::Conv3x3_8px;
         case 3: return Kernel::Conv3x3_F16;
         case 4: return Kernel::Conv3x3_F16Math;
+        case 5: return Kernel::Conv3x3_4oc_F16;
+        case 6: return Kernel::Conv3x3_8px_F16;
         default: return Kernel::Conv3x3;
     }
 }
 inline bool isConvKernel(Kernel k) {
     return k == Kernel::Conv3x3 || k == Kernel::Conv3x3_4oc || k == Kernel::Conv3x3_8px || k == Kernel::Conv3x3_F16 ||
-           k == Kernel::Conv3x3_F16Math;
+           k == Kernel::Conv3x3_F16Math || k == Kernel::Conv3x3_4oc_F16 || k == Kernel::Conv3x3_8px_F16 || k == Kernel::ConvK ||
+           k == Kernel::ConvK_F16;
 }
+inline int variantPixels(int variant) { return (variant == 2 || variant == 6) ? 8 : 4; }
+inline int variantChannels(int variant) { return (variant == 1 || variant == 5) ? 4 : 8; }
 inline const char* convVariantName(int variant) {
     switch (variant) {
         case 1: return "4px x 4ch";
         case 2: return "8px x 8ch";
         case 3: return "fp16 storage, 4px x 8ch";
         case 4: return "fp16 math, 4px x 8ch";
+        case 5: return "fp16 storage, 4px x 4ch";
+        case 6: return "fp16 storage, 8px x 8ch";
         default: return "4px x 8ch";
     }
 }
@@ -45,6 +53,7 @@ inline const char* convVariantName(int variant) {
 struct Push {
     int32_t i[8];
     float f[2];
+    int32_t j[2];
 };
 
 struct Bind {

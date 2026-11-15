@@ -52,6 +52,24 @@ std::unique_ptr<Backend> createVulkanBackend(const VulkanHandles&, const Model&,
 #ifndef VVA_SPV_RES_H
 #define VVA_SPV_RES_H 1
 #endif
+#ifndef VVA_SPV_CONV4OC_H
+#define VVA_SPV_CONV4OC_H 1
+#endif
+#ifndef VVA_SPV_CONV8PX_H
+#define VVA_SPV_CONV8PX_H 1
+#endif
+#ifndef VVA_SPV_CONVK
+#define VVA_SPV_CONVK 1
+#endif
+#ifndef VVA_SPV_CONVK_H
+#define VVA_SPV_CONVK_H 1
+#endif
+#ifndef VVA_SPV_SHUF
+#define VVA_SPV_SHUF 1
+#endif
+#ifndef VVA_SPV_SHUF_H
+#define VVA_SPV_SHUF_H 1
+#endif
 
 namespace vva {
 namespace gpu {
@@ -111,11 +129,17 @@ public:
         }
         if (VVA_SPV_CONV4OC) createShader(kSpvConv4oc, sizeof(kSpvConv4oc), shaders_[3]);
         if (VVA_SPV_CONV8PX) createShader(kSpvConv8px, sizeof(kSpvConv8px), shaders_[4]);
+        if (VVA_SPV_SHUF) createShader(kSpvShuffle, sizeof(kSpvShuffle), shaders_[9]);
+        if (VVA_SPV_CONVK) createShader(kSpvConvK, sizeof(kSpvConvK), shaders_[13]);
         if (fp16_) {
             if (VVA_SPV_CONV_H) createShader(kSpvConv3x3H, sizeof(kSpvConv3x3H), shaders_[5]);
             if (VVA_SPV_CONV_HA) createShader(kSpvConv3x3HA, sizeof(kSpvConv3x3HA), shaders_[6]);
             if (VVA_SPV_ELT_H) createShader(kSpvEltwiseH, sizeof(kSpvEltwiseH), shaders_[7]);
             if (VVA_SPV_RES_H) createShader(kSpvResizeH, sizeof(kSpvResizeH), shaders_[8]);
+            if (VVA_SPV_SHUF_H) createShader(kSpvShuffleH, sizeof(kSpvShuffleH), shaders_[10]);
+            if (VVA_SPV_CONV4OC_H) createShader(kSpvConv4ocH, sizeof(kSpvConv4ocH), shaders_[11]);
+            if (VVA_SPV_CONV8PX_H) createShader(kSpvConv8pxH, sizeof(kSpvConv8pxH), shaders_[12]);
+            if (VVA_SPV_CONVK_H) createShader(kSpvConvKH, sizeof(kSpvConvKH), shaders_[14]);
         }
         VkDescriptorSetLayoutBinding binds[4]{};
         for (uint32_t i = 0; i < 4; ++i) {
@@ -314,8 +338,10 @@ public:
     int outChannels() const override { return plan_->outChannels(); }
 
     int variantCount() const override {
-        if (variantAvailable(4)) return 5;
-        return variantAvailable(3) ? 4 : 3;
+        for (int v = kConvVariants - 1; v >= 3; --v) {
+            if (variantAvailable(v)) return v + 1;
+        }
+        return 3;
     }
     int variantIndex() const override { return variant_; }
     void setVariant(int variant) override {
@@ -507,6 +533,12 @@ private:
         }
         Compiled c;
         if (!plan_->build(h, w, c.program, error, variant_)) return nullptr;
+        for (const Command& cmd : c.program.commands) {
+            if (cmd.type == Command::kDispatch && !ensurePipeline(static_cast<int>(cmd.kernel))) {
+                if (error) *error = "this model needs a GPU shader that is not available on this device";
+                return nullptr;
+            }
+        }
         const Program& p = c.program;
         if (p.maxBindBytes > maxRange_ || p.arenaBytes > kMaxArenaBytes) {
             if (error) *error = "this image size needs more GPU memory than the device allows";

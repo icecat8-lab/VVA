@@ -37,12 +37,14 @@ stored (fp16) file with the float32 network.
 
 * The CPU path works everywhere. On a mid-range phone, the 6-block RRDBNet used for testing needs about
   15 seconds to turn a 128x192 image into 512x768 with 8 threads. Measure on your own target device.
-* Models with operators beyond the RRDBNet set (everything added for ONNX and SRVGGNetCompact: PReLU, transposed
-  convolution, pooling, bilinear resize, padding, ...) run on the CPU. The engine falls back to the CPU on its own.
-* A Vulkan GPU path exists for RRDBNet-style graphs (3x3 convolutions, LeakyReLU, residual adds, concat,
-  nearest resize; channel counts must be multiples of 8). It is verified on the host against the CPU, but it
-  has not been verified on real hardware yet, so it checks itself before use (see "GPU" below). There is no NPU
-  backend.
+* The GPU runs: odd KxK convolutions (1x1 to 11x11, stride 1, same padding) with fused ReLU, LeakyReLU, PReLU,
+  scaling and residual add, element-wise add / scale, concat (dense blocks share one buffer, no copies), nearest
+  resize and PixelShuffle. That covers RRDBNet, SRVGGNetCompact (realesr-general-x4v3, animevideov3), ESPCN-like and
+  DnCNN-like networks completely. Models that contain anything else (transposed convolution, pooling, stride 2,
+  depthwise convolution, bilinear resize, padding, PixelUnshuffle, ...) run on the CPU; the engine falls back on its
+  own. Channels must be multiples of 8 around concat operators.
+* The GPU kernels are verified on the host against the CPU, and on one real device (Adreno 642L). They check
+  themselves on every new device before use (see "GPU" below). There is no NPU backend.
 * Prebuilt files are provided for 64-bit ARM phones and tablets (arm64-v8a) only. Android 8.0 (API 26) or newer is
   required.
 
@@ -120,9 +122,10 @@ Notes:
 
 When a model is loaded, the engine tests the GPU path once: it runs a small image on both the GPU and the CPU,
 compares the results and compares the speed. The GPU is used only if the results agree and it is clearly faster.
-Five convolution kernels compete: three that keep activations in fp32 and two that keep activations and weights in
-fp16 (half the memory traffic and half the arena, so larger tiles fit; one does its arithmetic in fp32, the other in
-fp16). An fp16 kernel needs a device with `VK_KHR_16bit_storage` and `shaderFloat16`; it is chosen only when its result
+Up to seven convolution kernels compete: three that keep activations in fp32 (4 pixels x 8 channels, 4 x 4 and
+8 x 8 per thread), three that keep activations and weights in fp16 with the same shapes (half the memory traffic and
+half the arena, so larger tiles fit), and one that also does its arithmetic in fp16 (accumulating in groups of 4 input
+channels into fp32 to keep the error small). An fp16 kernel needs a device with `VK_KHR_16bit_storage` and `shaderFloat16`; it is chosen only when its result
 stays within 6e-3 of the output range of the CPU result (about 1.5 levels of an 8-bit picture) and it is at least 15%
 faster than the best fp32 kernel. If the fp16 shaders do not compile or the device lacks the features, the fp32
 kernels are used. An explicit `--tile` that is too large for the GPU is reduced to what fits instead of falling
