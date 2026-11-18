@@ -358,6 +358,16 @@ public:
 
     bool variantUsable(int variant) const override { return variantAvailable(variant); }
 
+    void setVariant(int variant) override {
+        if (variant < 0 || variant >= kConvVariants || variant == variant_) return;
+        vkQueueWaitIdle(queue_);
+        dropPrograms();
+        variant_ = variant;
+        lastH_ = lastW_ = -1;
+    }
+
+    int variantIndex() const override { return variant_; }
+
     bool fits(int h, int w) override { return estimateBytes(h, w) > 0; }
 
     size_t estimateBytes(int h, int w) override {
