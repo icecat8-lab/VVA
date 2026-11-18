@@ -33,6 +33,7 @@ public:
     virtual std::string profile(int h, int w) = 0;
     virtual int variantCount() const = 0;
     virtual void setVariant(int variant) = 0;
+    virtual bool variantUsable(int variant) const { (void)variant; return true; }
     virtual int variantIndex() const = 0;
     virtual int inChannels() const = 0;
     virtual int outChannels() const = 0;

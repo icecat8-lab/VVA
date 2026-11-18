@@ -142,7 +142,7 @@ def main():
         T.check(got2 is not None and got is not None and np.array_equal(got, got2), "%dx%d: a previous image of another size leaves no trace" % (h, w))
 
     print("== every convolution kernel variant against numpy ==")
-    for variant in range(7):
+    for variant in range(6):
         tol = 5e-5 if variant < 3 else 4e-3
         for nf, gc, nb, h, w, seed in ((16, 8, 1, 7, 21, 31), (8, 8, 1, 1, 1, 32), (16, 8, 1, 5, 40, 33), (16, 8, 2, 17, 9, 34)):
             sd = make_rrdbnet_state(nf, gc, nb, seed=seed)
@@ -261,7 +261,7 @@ def main():
         deq = {k: np.asarray(v, dtype=np.float64) for k, v in stored.items()}
         x = np.random.RandomState(h * 7 + wd).rand(3, h, wd).astype(np.float32)
         want = run_graph(meta, deq, x.astype(np.float64)).reshape(-1)
-        for variant in range(7):
+        for variant in range(6):
             text, got = emu(exe, path, x, variant=variant)
             tol = 5e-5 if variant < 3 else 4e-3
             T.check(got is not None and got.size == want.size and rel(got.astype(np.float64), want) < tol,
@@ -315,7 +315,16 @@ def main():
     w.add_tensor("slope", np.array([0.2, 0.3, 0.4], dtype=np.float32), "f32")
     w.add_node("PReLU", ["input", "slope"], ["output"])
     w.add_output("output", [1, 3, -1, -1])
-    refuse("PReLU that does not follow a convolution", w, "directly after a convolution")
+    path = os.path.join(WORK, "gp_prelu.vva")
+    w.save(path)
+    meta, stored = read_vva(path)
+    deq = {k: np.asarray(v, dtype=np.float64) for k, v in stored.items()}
+    xin = (np.random.RandomState(8).rand(3, 6, 7).astype(np.float32) - 0.5) * 2
+    want = run_graph(meta, deq, xin.astype(np.float64)).reshape(-1)
+    for variant in (0, 3):
+        text, got = emu(exe, path, xin, variant=variant)
+        T.check(got is not None and rel(got.astype(np.float64), want) < (5e-5 if variant == 0 else 4e-3),
+                "a PReLU on its own (not after a convolution) runs on the GPU, variant %d" % variant)
 
     w = VVAWriter(name="r", scale=1)
     w.add_input("input", [1, 3, -1, -1])

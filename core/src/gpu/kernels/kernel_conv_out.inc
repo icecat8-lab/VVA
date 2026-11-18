@@ -1,14 +1,5 @@
 void vva_put(int idx, float v) {
-    float t;
-    if (P_SLOPE > 0) {
-        int ch = idx / P_PLANE;
-        vec4 sv = vec4(wgt[P_SLOPE + (ch >> 2)]);
-        int lane = ch & 3;
-        float sl = lane == 0 ? sv.x : (lane == 1 ? sv.y : (lane == 2 ? sv.z : sv.w));
-        t = (v > 0.0 ? v : v * sl) * P_SCALE;
-    } else {
-        t = vva_act(v, P_ALPHA) * P_SCALE;
-    }
+    float t = vva_act(v, P_ALPHA) * P_SCALE;
     if (P_HASRES != 0) {
         t += float(res[idx]);
     }

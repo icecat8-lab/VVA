@@ -66,11 +66,15 @@ struct ConvData {
     size_t offset = 0;
     size_t floats = 0;
     int biasVec4 = 0;
-    int slopeVec4 = 0;
     int k = 3;
 };
 
-enum class OKind { Conv, Elt, Concat, Resize, Shuffle };
+struct SlopeData {
+    size_t offset = 0;
+    size_t floats = 0;
+};
+
+enum class OKind { Conv, Elt, Concat, Resize, Shuffle, Prelu };
 
 struct Op {
     OKind kind = OKind::Elt;
@@ -80,7 +84,7 @@ struct Op {
     float alpha = 1.f, scale = 1.f;
     int res = -1;
     int sh = 1, sw = 1;
-    bool prelu = false;
+    int slope = -1;
 };
 
 struct Tensor {
@@ -133,6 +137,7 @@ struct ClassAlloc {
 struct Plan::Impl {
     std::vector<float> weights;
     std::vector<ConvData> convs;
+    std::vector<SlopeData> slopes;
     std::vector<Op> ops;
     std::vector<Tensor> tensors;
     int inputTensor = 0, outputTensor = 0;
@@ -150,6 +155,7 @@ const std::vector<float>& Plan::weights() const { return impl_->weights; }
 std::vector<std::pair<size_t, size_t>> Plan::weightSlots() const {
     std::vector<std::pair<size_t, size_t>> slots;
     for (const ConvData& cd : impl_->convs) slots.emplace_back(cd.offset, cd.floats);
+    for (const SlopeData& sd : impl_->slopes) slots.emplace_back(sd.offset, sd.floats);
     return slots;
 }
 
@@ -261,8 +267,7 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
             const size_t packed = static_cast<size_t>(ob) * cd.cin * static_cast<size_t>(taps) * 8;
             cd.offset = roundUp(im.weights.size(), 64);
             cd.biasVec4 = static_cast<int>(packed / 4);
-            cd.slopeVec4 = static_cast<int>((packed + static_cast<size_t>(ob) * 8) / 4);
-            cd.floats = packed + static_cast<size_t>(ob) * 16;
+            cd.floats = packed + static_cast<size_t>(ob) * 8;
             im.weights.resize(cd.offset + roundUp(cd.floats, 64), 0.f);
             for (int o = 0; o < ob; ++o) {
                 for (int ic = 0; ic < cd.cin; ++ic) {
@@ -457,14 +462,6 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
                 if ((q.kind == PKind::Leaky) && !act && !scaled && !hasRes) {
                     op.alpha = q.value;
                     act = true;
-                } else if (q.kind == PKind::PReLU && !act && !scaled && !hasRes) {
-                    ConvData& cdp = im.convs[static_cast<size_t>(op.conv)];
-                    for (int j2 = 0; j2 < cdp.cout; ++j2) {
-                        im.weights[cdp.offset + static_cast<size_t>(cdp.slopeVec4) * 4 + static_cast<size_t>(j2)] =
-                            q.slopes[q.slopes.size() == 1 ? 0 : static_cast<size_t>(j2)];
-                    }
-                    op.prelu = true;
-                    act = true;
                 } else if (q.kind == PKind::MulS && !scaled && !hasRes) {
                     op.scale = q.value;
                     scaled = true;
@@ -511,8 +508,18 @@ std::unique_ptr<Plan> Plan::create(const Model& model, std::string* reason) {
             op.in = p.in;
             op.out = p.out;
         } else if (p.kind == PKind::PReLU) {
-            fail(reason, "PReLU runs on the GPU only directly after a convolution");
-            return nullptr;
+            op.kind = OKind::Prelu;
+            op.in = p.in;
+            op.out = p.out;
+            const int cc = channels[static_cast<size_t>(p.in[0])];
+            const size_t c8n = static_cast<size_t>((cc + 7) / 8 * 8);
+            SlopeData sd;
+            sd.offset = (im.weights.size() + 63) / 64 * 64;
+            sd.floats = c8n;
+            im.weights.resize(sd.offset + (c8n + 63) / 64 * 64, 0.f);
+            for (int j2 = 0; j2 < cc; ++j2) im.weights[sd.offset + static_cast<size_t>(j2)] = p.slopes[p.slopes.size() == 1 ? 0 : static_cast<size_t>(j2)];
+            op.slope = static_cast<int>(im.slopes.size());
+            im.slopes.push_back(sd);
         } else if (p.kind == PKind::Shuffle) {
             op.kind = OKind::Shuffle;
             op.in = p.in;
@@ -812,7 +819,6 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
                 cmd.push.i[4] = y0;
                 cmd.push.i[5] = op.res >= 0 ? 1 : 0;
                 cmd.push.i[6] = static_cast<int32_t>(plane(op.in[0]));
-                cmd.push.i[7] = op.prelu ? cd.slopeVec4 : 0;
                 cmd.push.f[0] = op.alpha;
                 cmd.push.f[1] = op.scale;
                 cmd.bind[0] = bindArenaSlack(op.in[0]);
@@ -862,6 +868,28 @@ bool Plan::build(int h, int w, Program& prog, std::string* error, int convVarian
                 channelOffset += c8(t);
                 push(cmd);
             }
+        } else if (op.kind == OKind::Prelu) {
+            const SlopeData& sd = im.slopes[static_cast<size_t>(op.slope)];
+            const size_t count = c8(op.out) * plane(op.out);
+            Command cmd;
+            cmd.type = Command::kDispatch;
+            cmd.kernel = half ? Kernel::Prelu_F16 : Kernel::Prelu;
+            const size_t groups = (count + 63) / 64;
+            const size_t gx = std::min<size_t>(groups, 32768);
+            cmd.gx = static_cast<uint32_t>(gx);
+            cmd.gy = static_cast<uint32_t>((groups + gx - 1) / gx);
+            cmd.gz = 1;
+            cmd.push.i[0] = static_cast<int32_t>(count);
+            cmd.push.i[2] = static_cast<int32_t>(gx * 64);
+            cmd.push.i[3] = static_cast<int32_t>(plane(op.out));
+            cmd.bind[0] = bindArena(op.in[0]);
+            cmd.bind[1].buffer = 1;
+            cmd.bind[1].offset = sd.offset * sizeof(float);
+            cmd.bind[1].size = sd.floats * static_cast<size_t>(eb);
+            cmd.bind[2] = bindArena(op.out);
+            cmd.bind[3] = cmd.bind[2];
+            cmd.flops = static_cast<double>(count);
+            push(cmd);
         } else if (op.kind == OKind::Shuffle) {
             const Tensor& tin = tensors[static_cast<size_t>(op.in[0])];
             const Tensor& tout = tensors[static_cast<size_t>(op.out)];

@@ -50,6 +50,7 @@ public:
     void setMemoryBudgetMB(int mb);
     void setProgressCallback(ProgressCallback cb);
     void setCacheDir(const std::string& dir);
+    void setHalfPrecision(bool allowed);
 
     void cancel();
 

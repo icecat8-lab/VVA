@@ -36,6 +36,7 @@ void printUsage() {
         "  --device D    auto (default), cpu or gpu\n"
         "\n"
         "Options for every command that loads a model:\n"
+        "  --precision P auto (default; may use fp16 on the GPU when it passes the test) or full (fp32 only)\n"
         "  --cache-dir D folder for the remembered GPU test result (default: next to the model if it is writable,\n"
         "                otherwise $TMPDIR)\n"
         "\n"
@@ -140,9 +141,21 @@ bool parseIntOption(int argc, char** argv, int& i, const char* name, int& out) {
 }
 
 std::string g_cacheDir;
+bool g_halfAllowed = true;
 
 void takeCacheDir(int& argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--precision") == 0) {
+            if (i + 1 >= argc || (std::strcmp(argv[i + 1], "full") != 0 && std::strcmp(argv[i + 1], "auto") != 0)) {
+                std::fprintf(stderr, "--precision needs 'full' or 'auto'\n");
+                std::exit(1);
+            }
+            g_halfAllowed = std::strcmp(argv[i + 1], "full") != 0;
+            for (int j = i; j + 2 < argc; ++j) argv[j] = argv[j + 2];
+            argc -= 2;
+            --i;
+            continue;
+        }
         if (std::strcmp(argv[i], "--cache-dir") != 0) continue;
         if (i + 1 >= argc) {
             std::fprintf(stderr, "missing value for --cache-dir\n");
@@ -197,6 +210,7 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[1], "info") == 0 && argc == 3) {
         vva::Engine engine;
         if (!g_cacheDir.empty()) engine.setCacheDir(g_cacheDir);
+        engine.setHalfPrecision(g_halfAllowed);
         if (!engine.loadModel(argv[2])) {
             std::fprintf(stderr, "error: %s\n", engine.lastError().c_str());
             return 1;
@@ -216,6 +230,7 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[1], "profile") == 0 && (argc == 3 || argc == 4)) {
         vva::Engine engine;
         if (!g_cacheDir.empty()) engine.setCacheDir(g_cacheDir);
+        engine.setHalfPrecision(g_halfAllowed);
         if (!engine.loadModel(argv[2])) {
             std::fprintf(stderr, "error: %s\n", engine.lastError().c_str());
             return 1;
@@ -237,6 +252,7 @@ int main(int argc, char** argv) {
             if (::mkdtemp(buf.data())) fresh = buf.data();
         }
         if (!fresh.empty()) engine.setCacheDir(fresh);
+        engine.setHalfPrecision(g_halfAllowed);
         std::printf("VVA device report\n");
         std::printf("vva-cli %s, %s, %u cpu threads\n", VVA_VERSION, buildTarget(), std::thread::hardware_concurrency());
         if (engine.hasVulkan()) std::printf("Vulkan: available, %s\n", engine.vulkanDeviceName().c_str());
@@ -254,6 +270,7 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[1], "classify") == 0 && argc == 4) {
         vva::Engine engine;
         if (!g_cacheDir.empty()) engine.setCacheDir(g_cacheDir);
+        engine.setHalfPrecision(g_halfAllowed);
         if (!engine.loadModel(argv[2])) {
             std::fprintf(stderr, "error: %s\n", engine.lastError().c_str());
             return 1;
@@ -302,6 +319,7 @@ int main(int argc, char** argv) {
 
         vva::Engine engine;
         if (!g_cacheDir.empty()) engine.setCacheDir(g_cacheDir);
+        engine.setHalfPrecision(g_halfAllowed);
         if (!engine.loadModel(argv[2])) {
             std::fprintf(stderr, "error: %s\n", engine.lastError().c_str());
             return 1;

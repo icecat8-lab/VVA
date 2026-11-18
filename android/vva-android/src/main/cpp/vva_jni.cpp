@@ -346,6 +346,15 @@ JNIEXPORT void JNICALL Java_com_vva_engine_VVAEngine_nativeSetTileSize(JNIEnv*, 
     if (Handle* h = toHandle(handle)) h->engine.setTileSize(v);
 }
 
+JNIEXPORT void JNICALL Java_com_vva_engine_VVAEngine_nativeSetHalfPrecision(JNIEnv*, jclass, jlong handle, jboolean allowed) {
+    Handle* h = toHandle(handle);
+    if (!h) return;
+    try {
+        h->engine.setHalfPrecision(allowed == JNI_TRUE);
+    } catch (...) {
+    }
+}
+
 JNIEXPORT void JNICALL Java_com_vva_engine_VVAEngine_nativeSetCacheDir(JNIEnv* env, jclass, jlong handle, jstring dir) {
     Handle* h = toHandle(handle);
     if (!h || !dir) return;

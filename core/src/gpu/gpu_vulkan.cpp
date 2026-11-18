@@ -43,8 +43,11 @@ std::unique_ptr<Backend> createVulkanBackend(const VulkanHandles&, const Model&,
 #ifndef VVA_SPV_CONV_H
 #define VVA_SPV_CONV_H 1
 #endif
-#ifndef VVA_SPV_CONV_HA
-#define VVA_SPV_CONV_HA 1
+#ifndef VVA_SPV_PRELU
+#define VVA_SPV_PRELU 1
+#endif
+#ifndef VVA_SPV_PRELU_H
+#define VVA_SPV_PRELU_H 1
 #endif
 #ifndef VVA_SPV_ELT_H
 #define VVA_SPV_ELT_H 1
@@ -122,24 +125,27 @@ public:
                       (props.apiVersion >> 12) & 0x3ffu, props.apiVersion & 0xfffu);
         identity_ = idbuf;
 
-        if (!createShader(kSpvConv3x3, sizeof(kSpvConv3x3), shaders_[0]) || !createShader(kSpvEltwise, sizeof(kSpvEltwise), shaders_[1]) ||
-            !createShader(kSpvResize, sizeof(kSpvResize), shaders_[2])) {
+        auto at = [this](Kernel k) -> VkShaderModule& { return shaders_[static_cast<int>(k)]; };
+        if (!createShader(kSpvConv3x3, sizeof(kSpvConv3x3), at(Kernel::Conv3x3)) ||
+            !createShader(kSpvEltwise, sizeof(kSpvEltwise), at(Kernel::Eltwise)) ||
+            !createShader(kSpvResize, sizeof(kSpvResize), at(Kernel::Resize))) {
             *status = "the driver rejected a shader";
             return false;
         }
-        if (VVA_SPV_CONV4OC) createShader(kSpvConv4oc, sizeof(kSpvConv4oc), shaders_[3]);
-        if (VVA_SPV_CONV8PX) createShader(kSpvConv8px, sizeof(kSpvConv8px), shaders_[4]);
-        if (VVA_SPV_SHUF) createShader(kSpvShuffle, sizeof(kSpvShuffle), shaders_[9]);
-        if (VVA_SPV_CONVK) createShader(kSpvConvK, sizeof(kSpvConvK), shaders_[13]);
+        if (VVA_SPV_CONV4OC) createShader(kSpvConv4oc, sizeof(kSpvConv4oc), at(Kernel::Conv3x3_4oc));
+        if (VVA_SPV_CONV8PX) createShader(kSpvConv8px, sizeof(kSpvConv8px), at(Kernel::Conv3x3_8px));
+        if (VVA_SPV_SHUF) createShader(kSpvShuffle, sizeof(kSpvShuffle), at(Kernel::Shuffle));
+        if (VVA_SPV_CONVK) createShader(kSpvConvK, sizeof(kSpvConvK), at(Kernel::ConvK));
+        if (VVA_SPV_PRELU) createShader(kSpvPrelu, sizeof(kSpvPrelu), at(Kernel::Prelu));
         if (fp16_) {
-            if (VVA_SPV_CONV_H) createShader(kSpvConv3x3H, sizeof(kSpvConv3x3H), shaders_[5]);
-            if (VVA_SPV_CONV_HA) createShader(kSpvConv3x3HA, sizeof(kSpvConv3x3HA), shaders_[6]);
-            if (VVA_SPV_ELT_H) createShader(kSpvEltwiseH, sizeof(kSpvEltwiseH), shaders_[7]);
-            if (VVA_SPV_RES_H) createShader(kSpvResizeH, sizeof(kSpvResizeH), shaders_[8]);
-            if (VVA_SPV_SHUF_H) createShader(kSpvShuffleH, sizeof(kSpvShuffleH), shaders_[10]);
-            if (VVA_SPV_CONV4OC_H) createShader(kSpvConv4ocH, sizeof(kSpvConv4ocH), shaders_[11]);
-            if (VVA_SPV_CONV8PX_H) createShader(kSpvConv8pxH, sizeof(kSpvConv8pxH), shaders_[12]);
-            if (VVA_SPV_CONVK_H) createShader(kSpvConvKH, sizeof(kSpvConvKH), shaders_[14]);
+            if (VVA_SPV_CONV_H) createShader(kSpvConv3x3H, sizeof(kSpvConv3x3H), at(Kernel::Conv3x3_F16));
+            if (VVA_SPV_ELT_H) createShader(kSpvEltwiseH, sizeof(kSpvEltwiseH), at(Kernel::Eltwise_F16));
+            if (VVA_SPV_RES_H) createShader(kSpvResizeH, sizeof(kSpvResizeH), at(Kernel::Resize_F16));
+            if (VVA_SPV_SHUF_H) createShader(kSpvShuffleH, sizeof(kSpvShuffleH), at(Kernel::Shuffle_F16));
+            if (VVA_SPV_CONV4OC_H) createShader(kSpvConv4ocH, sizeof(kSpvConv4ocH), at(Kernel::Conv3x3_4oc_F16));
+            if (VVA_SPV_CONV8PX_H) createShader(kSpvConv8pxH, sizeof(kSpvConv8pxH), at(Kernel::Conv3x3_8px_F16));
+            if (VVA_SPV_CONVK_H) createShader(kSpvConvKH, sizeof(kSpvConvKH), at(Kernel::ConvK_F16));
+            if (VVA_SPV_PRELU_H) createShader(kSpvPreluH, sizeof(kSpvPreluH), at(Kernel::Prelu_F16));
         }
         VkDescriptorSetLayoutBinding binds[4]{};
         for (uint32_t i = 0; i < 4; ++i) {
@@ -219,6 +225,15 @@ public:
         return true;
     }
 
+    void applyWorkTargets() {
+        double dispatchFlops = 2.5e8, segmentFlops = 1.0e9;
+        if (flopsPerSec_ > 0.0) {
+            dispatchFlops = std::min(1.0e9, std::max(5.0e7, flopsPerSec_ * 0.025));
+            segmentFlops = std::min(4.0e9, std::max(2.0e8, flopsPerSec_ * 0.1));
+        }
+        Plan::setWorkTargets(dispatchFlops, segmentFlops);
+    }
+
     bool preparePipelines(int v) {
         if (!variantAvailable(v)) return false;
         const bool half = variantIsHalf(v);
@@ -253,9 +268,11 @@ public:
     std::string profile(int h, int w) override {
         if (lost_) return "the GPU was lost earlier";
         std::string err;
+        profiling_ = true;
         Plan::setWorkTargets(1.0e9, 0.0);
         Compiled* c = compiled(h, w, &err, std::make_pair(-h, -w));
-        Plan::setWorkTargets(1.0e9, 4.0e9);
+        profiling_ = false;
+        applyWorkTargets();
         if (!c) return "cannot prepare the profile: " + err;
         const Program& p = c->program;
         lastH_ = lastW_ = -1;
@@ -337,20 +354,9 @@ public:
     int inChannels() const override { return plan_->inChannels(); }
     int outChannels() const override { return plan_->outChannels(); }
 
-    int variantCount() const override {
-        for (int v = kConvVariants - 1; v >= 3; --v) {
-            if (variantAvailable(v)) return v + 1;
-        }
-        return 3;
-    }
-    int variantIndex() const override { return variant_; }
-    void setVariant(int variant) override {
-        if (variant < 0 || variant >= kConvVariants || variant == variant_) return;
-        vkQueueWaitIdle(queue_);
-        dropPrograms();
-        variant_ = variant;
-        lastH_ = lastW_ = -1;
-    }
+    int variantCount() const override { return kConvVariants; }
+
+    bool variantUsable(int variant) const override { return variantAvailable(variant); }
 
     bool fits(int h, int w) override { return estimateBytes(h, w) > 0; }
 
@@ -391,6 +397,7 @@ public:
             }
         }
 
+        const auto runStart = std::chrono::steady_clock::now();
         for (VkCommandBuffer cmd : c->segments) {
             if (cancel && cancel->load(std::memory_order_relaxed)) return fail(error, "cancelled", Status::Cancelled);
             VkSubmitInfo si{};
@@ -402,6 +409,13 @@ public:
             r = vkWaitForFences(dev_, 1, &fence_, VK_TRUE, kFenceTimeoutNs);
             if (r != VK_SUCCESS) return deviceFailure(r, "vkWaitForFences", error);
             vkResetFences(dev_, 1, &fence_);
+        }
+        {
+            const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - runStart).count();
+            if (secs > 0.02 && p.flops > 0.0) {
+                const double sample = p.flops / secs;
+                flopsPerSec_ = flopsPerSec_ <= 0.0 ? sample : 0.7 * flopsPerSec_ + 0.3 * sample;
+            }
         }
 
         const size_t outRow = static_cast<size_t>(p.outW) + 2;
@@ -531,6 +545,7 @@ private:
             if (error) *error = "cannot allocate the fp16 weights buffer";
             return nullptr;
         }
+        if (!profiling_) applyWorkTargets();
         Compiled c;
         if (!plan_->build(h, w, c.program, error, variant_)) return nullptr;
         for (const Command& cmd : c.program.commands) {
@@ -673,6 +688,8 @@ private:
     VkQueue queue_;
     uint32_t family_;
     bool fp16_ = false;
+    double flopsPerSec_ = 0.0;
+    bool profiling_ = false;
     std::unique_ptr<Plan> plan_;
     size_t maxRange_ = 0;
     std::string deviceName_, identity_;

@@ -151,7 +151,7 @@ struct GpuConfig {
 };
 
 std::string formatGpuConfig(const GpuConfig& c) {
-    std::string s = "vva-gpu-config 2\n";
+    std::string s = "vva-gpu-config 3\n";
     s += "identity=" + c.identity + "\n";
     s += std::string("usable=") + (c.usable ? "1" : "0") + "\n";
     s += "variant=" + std::to_string(c.variant) + "\n";
@@ -162,7 +162,7 @@ std::string formatGpuConfig(const GpuConfig& c) {
 
 bool parseGpuConfig(const std::string& text, GpuConfig& c) {
     c = GpuConfig();
-    if (text.compare(0, 17, "vva-gpu-config 2\n") != 0) return false;
+    if (text.compare(0, 17, "vva-gpu-config 3\n") != 0) return false;
     size_t pos = 17;
     bool haveIdentity = false, haveUsable = false;
     while (pos < text.size()) {
@@ -267,6 +267,7 @@ public:
 
     std::string modelPath;
     std::string cacheDir;
+    bool halfAllowed = true;
     int classifierSize = 0;
 
     static std::string baseName(const std::string& path) {
@@ -440,14 +441,20 @@ public:
         const int variants = std::max(1, gpuBackend->variantCount());
         const int lo = onlyVariant >= 0 ? onlyVariant : 0;
         const int hi = onlyVariant >= 0 ? onlyVariant + 1 : variants;
+        struct Candidate {
+            int v;
+            double score, rate;
+        };
+        std::vector<Candidate> passing;
         int best = -1;
-        double bestRate = 0.0, bestScore = 0.0;
+        double bestRate = 0.0;
         std::string problem, rates, skipped;
         auto skip = [&](int v, const std::string& why) {
             skipped += (skipped.empty() ? "" : "; ") + std::string(gpu::convVariantName(v)) + ": " + why.substr(0, 80);
         };
         bool wrongOnly = true;
         for (int v = lo; v < hi; ++v) {
+            if (!gpuBackend->variantUsable(v) || (gpu::variantIsHalf(v) && !halfAllowed)) continue;
             gpuBackend->setVariant(v);
             err.clear();
             const gpu::Backend::Status st = gpuBackend->run(in.data(), h1, w1, gpuOut.data(), nullptr, &err);
@@ -489,12 +496,49 @@ public:
                 std::snprintf(buf, sizeof(buf), "%s%s %.0f", rates.empty() ? "" : ", ", gpu::convVariantName(v), rate);
                 rates += buf;
             }
-            const double score = gpu::variantIsHalf(v) ? rate / 1.15 : rate;
-            if (best < 0 || score > bestScore) {
-                best = v;
-                bestRate = rate;
-                bestScore = score;
+            passing.push_back({v, gpu::variantIsHalf(v) ? rate / 1.15 : rate, rate});
+        }
+        std::stable_sort(passing.begin(), passing.end(), [](const Candidate& a, const Candidate& b) { return a.score > b.score; });
+        int ref = -1;
+        for (const Candidate& c : passing) {
+            if (!gpu::variantIsHalf(c.v)) {
+                ref = c.v;
+                break;
             }
+        }
+        for (const Candidate& c : passing) {
+            if (measure && ref >= 0 && c.v != ref && gpu::variantIsHalf(c.v)) {
+                const int h3 = 70, w3 = 94;
+                Shape os3;
+                std::vector<float> in3(static_cast<size_t>(ch) * h3 * w3);
+                fillProbe(in3, 13);
+                bool ok3 = exec->outputShape(h3, w3, &os3);
+                std::vector<float> refOut(ok3 ? numel(os3) : 0), candOut(refOut.size());
+                if (ok3) {
+                    gpuBackend->setVariant(ref);
+                    ok3 = gpuBackend->run(in3.data(), h3, w3, refOut.data(), nullptr, &err) == gpu::Backend::Status::Ok;
+                }
+                if (ok3) {
+                    gpuBackend->setVariant(c.v);
+                    ok3 = gpuBackend->run(in3.data(), h3, w3, candOut.data(), nullptr, &err) == gpu::Backend::Status::Ok;
+                }
+                double rng3 = 1.0, worst3 = 0.0;
+                for (size_t i = 0; ok3 && i < refOut.size(); ++i) {
+                    rng3 = std::max(rng3, static_cast<double>(std::fabs(refOut[i])));
+                    const double d = std::fabs(static_cast<double>(refOut[i]) - static_cast<double>(candOut[i]));
+                    if (!(d <= worst3)) worst3 = d;
+                }
+                if (!ok3 || !(worst3 / rng3 <= 6e-3)) {
+                    char why[80];
+                    std::snprintf(why, sizeof(why), "rejected on a larger image (%s)", ok3 ? "results differ" : "did not run");
+                    skip(c.v, why);
+                    problem = "the GPU kernels disagreed on a larger image";
+                    continue;
+                }
+            }
+            best = c.v;
+            bestRate = c.rate;
+            break;
         }
         if (best < 0) {
             if (wrongOnly && !problem.empty()) *shortReason = "gave wrong results";
@@ -520,7 +564,7 @@ public:
     }
 
     void finishGpuSetup(bool checkSpeed) {
-        const std::string identity = gpuBackend->identity();
+        const std::string identity = gpuBackend->identity() + (halfAllowed ? "" : "|precise");
         const std::string cacheStem = (checkSpeed && !modelPath.empty()) ? cacheBase(modelPath) : std::string();
         const std::string cachePath = cacheStem.empty() ? std::string() : cacheStem + ".gpucfg";
         GpuConfig cfg;
@@ -688,6 +732,9 @@ public:
         bool gpuFellBack = false;
         int tile = tileSize > 0 ? std::max(tileSize, 16) : chooseTile(w, h, pad, useGpu);
         if (tile >= std::max(w, h)) tile = std::max(w, h);
+        int memoryRetries = 0;
+    retryWithSmallerTile:
+        if (memoryRetries > 0) tile = std::max(32, tile / 2);
         if (tileSize > 0 && useGpu) {
             const int gm = std::max(1, exec->inputMultiple());
             while (tile > 32) {
@@ -758,6 +805,11 @@ public:
                     if (gs == gpu::Backend::Status::Cancelled) {
                         setError("cancelled");
                         return false;
+                    }
+                    if (gs != gpu::Backend::Status::Ok && done == 0 && tile > 32 && memoryRetries < 3 &&
+                        (err.find("memory") != std::string::npos || err.find("allocate") != std::string::npos)) {
+                        ++memoryRetries;
+                        goto retryWithSmallerTile;
                     }
                     if (gs != gpu::Backend::Status::Ok) {
                         gpuState = "stopped after an error: " + err;
@@ -884,6 +936,8 @@ Engine::Engine() : pimpl(new Impl()) {}
 Engine::~Engine() = default;
 
 void Engine::setCacheDir(const std::string& dir) { pimpl->cacheDir = dir; }
+
+void Engine::setHalfPrecision(bool allowed) { pimpl->halfAllowed = allowed; }
 
 bool Engine::loadModel(const std::string& modelPath) {
     try {

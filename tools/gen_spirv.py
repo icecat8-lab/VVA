@@ -14,13 +14,14 @@ SHADERS = [("kSpvConv3x3", "conv3x3.comp", None, []), ("kSpvEltwise", "eltwise.c
            ("kSpvResize", "resize.comp", None, []), ("kSpvConv4oc", "conv3x3_4oc.comp", "VVA_SPV_CONV4OC", []),
            ("kSpvConv8px", "conv3x3_8px.comp", "VVA_SPV_CONV8PX", []),
            ("kSpvConv3x3H", "conv3x3.comp", "VVA_SPV_CONV_H", ["VVA_STORE_F16"]),
-           ("kSpvConv3x3HA", "conv3x3.comp", "VVA_SPV_CONV_HA", ["VVA_STORE_F16", "VVA_MATH_F16"]),
            ("kSpvEltwiseH", "eltwise.comp", "VVA_SPV_ELT_H", ["VVA_STORE_F16"]),
            ("kSpvResizeH", "resize.comp", "VVA_SPV_RES_H", ["VVA_STORE_F16"]),
            ("kSpvConv4ocH", "conv3x3_4oc.comp", "VVA_SPV_CONV4OC_H", ["VVA_STORE_F16"]),
            ("kSpvConv8pxH", "conv3x3_8px.comp", "VVA_SPV_CONV8PX_H", ["VVA_STORE_F16"]),
            ("kSpvConvK", "convk.comp", "VVA_SPV_CONVK", []),
            ("kSpvConvKH", "convk.comp", "VVA_SPV_CONVK_H", ["VVA_STORE_F16"]),
+           ("kSpvPrelu", "prelu.comp", "VVA_SPV_PRELU", []),
+           ("kSpvPreluH", "prelu.comp", "VVA_SPV_PRELU_H", ["VVA_STORE_F16"]),
            ("kSpvShuffle", "shuffle.comp", "VVA_SPV_SHUF", []),
            ("kSpvShuffleH", "shuffle.comp", "VVA_SPV_SHUF_H", ["VVA_STORE_F16"])]
 

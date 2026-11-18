@@ -5,7 +5,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <memory>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -31,6 +33,9 @@ struct Mode {
     bool deviceLost = false;
     float corrupt = 0.f;
     int badMask = 0;
+    int badLargeMask = 0;
+    int slowFp32Ms = 0;
+    int usableMask = 0xff;
     std::string identity = "emulated";
 };
 
@@ -56,19 +61,24 @@ public:
             if (error) *error = "simulated failure";
             return mode_.deviceLost ? Status::DeviceLost : Status::Error;
         }
+        if (mode_.slowFp32Ms > 0 && !vva::gpu::variantIsHalf(variant_)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(mode_.slowFp32Ms));
+        }
         vva::gpu::Program prog;
         std::string err;
         if (!plan_->build(h, w, prog, &err, variant_) || !emu_.run(prog, in, out, &err)) {
             if (error) *error = err;
             return Status::Error;
         }
-        if (mode_.corrupt != 0.f || (mode_.badMask & (1 << variant_))) {
+        if (mode_.corrupt != 0.f || (mode_.badMask & (1 << variant_)) ||
+            ((mode_.badLargeMask & (1 << variant_)) && h * w > 4000)) {
             const size_t n = static_cast<size_t>(prog.outChannels) * prog.outH * prog.outW;
             for (size_t i = 0; i < n; ++i) out[i] += mode_.corrupt != 0.f ? mode_.corrupt : 0.25f;
         }
         return Status::Ok;
     }
     int variantCount() const override { return vva::gpu::kConvVariants; }
+    bool variantUsable(int v) const override { return ((mode_.usableMask >> v) & 1) != 0; }
     void setVariant(int v) override { variant_ = v; }
     int variantIndex() const override { return variant_; }
     std::string describe() const override { return "emulated"; }
@@ -248,6 +258,36 @@ int main(int argc, char** argv) {
             CHECK(found == 1, "the verdict goes into the folder given to setCacheDir");
             CHECK(::stat(beside.c_str(), &sb) != 0, "nothing is written next to the model when a cache folder is set");
             ::rmdir(dir.c_str());
+        }
+        {
+            const std::string cfgPath = std::string(argv[1]) + ".gpucfg";
+            std::remove(cfgPath.c_str());
+            vva::Engine ex;
+            ex.loadModel(argv[1]);
+            Mode large;
+            large.slowFp32Ms = 3000;
+            large.usableMask = (1 << 0) | (1 << 3);
+            large.badLargeMask = 1 << 3;
+            attach(ex, *model, large, true);
+            const std::string stx = ex.gpuStatus();
+            CHECK(stx.find("rejected on a larger image") != std::string::npos,
+                  ("a fp16 kernel that is right on small images but wrong on a larger one is dropped: " + stx).c_str());
+            std::remove(cfgPath.c_str());
+        }
+        for (int allowed = 0; allowed < 2; ++allowed) {
+            const std::string cfgPath = std::string(argv[1]) + ".gpucfg";
+            std::remove(cfgPath.c_str());
+            vva::Engine ep;
+            ep.setHalfPrecision(allowed != 0);
+            ep.loadModel(argv[1]);
+            Mode fast;
+            fast.slowFp32Ms = 400;
+            attach(ep, *model, fast, true);
+            const std::string stp = ep.gpuStatus();
+            const bool mentionsHalf = stp.find("fp16") != std::string::npos;
+            CHECK(mentionsHalf == (allowed != 0),
+                  (std::string(allowed ? "fp16 kernels are tried by default: " : "full precision never tries fp16 kernels: ") + stp).c_str());
+            std::remove(cfgPath.c_str());
         }
         vva::Engine e2;
         e2.loadModel(argv[1]);

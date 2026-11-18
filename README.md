@@ -122,10 +122,15 @@ Notes:
 
 When a model is loaded, the engine tests the GPU path once: it runs a small image on both the GPU and the CPU,
 compares the results and compares the speed. The GPU is used only if the results agree and it is clearly faster.
-Up to seven convolution kernels compete: three that keep activations in fp32 (4 pixels x 8 channels, 4 x 4 and
-8 x 8 per thread), three that keep activations and weights in fp16 with the same shapes (half the memory traffic and
-half the arena, so larger tiles fit), and one that also does its arithmetic in fp16 (accumulating in groups of 4 input
-channels into fp32 to keep the error small). An fp16 kernel needs a device with `VK_KHR_16bit_storage` and `shaderFloat16`; it is chosen only when its result
+Up to six convolution kernels compete: three that keep activations in fp32 (4 pixels x 8 channels, 4 x 4 and
+8 x 8 per thread) and three that keep activations and weights in fp16 with the same shapes (half the memory traffic and
+half the arena, so larger tiles fit; the arithmetic stays in fp32). An fp16 kernel is only chosen when it passes the
+CPU comparison, agrees with the best fp32 kernel on a larger image, and is at least 15% faster. Pass
+`--precision full` (CLI) or call `setHalfPrecision(false)` (Java) to use fp32 kernels only.
+
+To avoid the Android GPU watchdog on slow GPUs, the size of each dispatch and submit adapts to the speed measured on
+the device, and if the GPU runs out of memory on the first tile the engine retries with half the tile size before
+giving up on the GPU. An fp16 kernel needs a device with `VK_KHR_16bit_storage` and `shaderFloat16`; it is chosen only when its result
 stays within 6e-3 of the output range of the CPU result (about 1.5 levels of an 8-bit picture) and it is at least 15%
 faster than the best fp32 kernel. If the fp16 shaders do not compile or the device lacks the features, the fp32
 kernels are used. An explicit `--tile` that is too large for the GPU is reduced to what fits instead of falling

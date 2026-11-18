@@ -34,50 +34,6 @@ inline vec4& operator+=(vec4& a, const vec4& b) {
     return a;
 }
 
-struct Half {
-    float v;
-    Half() : v(0) {}
-    Half(float x) : v(roundToHalf(x)) {}
-    operator float() const { return v; }
-};
-inline Half operator+(Half a, Half b) { return Half(a.v + b.v); }
-inline Half operator*(Half a, Half b) { return Half(a.v * b.v); }
-
-struct hvec4 {
-    Half x, y, z, w;
-    hvec4() {}
-    hvec4(float s) : x(s), y(s), z(s), w(s) {}
-    hvec4(const vec4& a) : x(a.x), y(a.y), z(a.z), w(a.w) {}
-    operator vec4() const {
-        vec4 r;
-        r.x = x.v;
-        r.y = y.v;
-        r.z = z.v;
-        r.w = w.v;
-        return r;
-    }
-};
-inline hvec4 operator+(const hvec4& a, const hvec4& b) {
-    hvec4 r;
-    r.x = a.x + b.x;
-    r.y = a.y + b.y;
-    r.z = a.z + b.z;
-    r.w = a.w + b.w;
-    return r;
-}
-inline hvec4 operator*(Half s, const hvec4& a) {
-    hvec4 r;
-    r.x = s * a.x;
-    r.y = s * a.y;
-    r.z = s * a.z;
-    r.w = s * a.w;
-    return r;
-}
-inline hvec4& operator+=(hvec4& a, const hvec4& b) {
-    a = a + b;
-    return a;
-}
-
 struct uvec3 {
     unsigned x, y, z;
 };
@@ -120,23 +76,12 @@ uvec3 gl_GlobalInvocationID;
 #define P_YBASE p.i4
 #define P_HASRES p.i5
 #define P_PLANE p.i6
-#define P_SLOPE p.i7
 #define P_ALPHA p.f0
 #define P_SCALE p.f1
 #define P_K p.j0
 #include "kernels/kernel_conv_out.inc"
 void emuConv() {
 #include "kernels/kernel_conv3x3.inc"
-}
-#ifndef VVA_GROUP
-#define VVA_GROUP 4
-#endif
-void emuConvHA() {
-    typedef Half vva_real;
-    typedef hvec4 vva_vec4;
-#define VVA_MATH_F16 1
-#include "kernels/kernel_conv3x3.inc"
-#undef VVA_MATH_F16
 }
 void emuConvK() {
 #include "kernels/kernel_convk.inc"
@@ -154,7 +99,6 @@ void emuConv8px() {
 #undef P_YBASE
 #undef P_HASRES
 #undef P_PLANE
-#undef P_SLOPE
 #undef P_ALPHA
 #undef P_SCALE
 #undef P_K
@@ -195,6 +139,16 @@ void emuResize() {
 #define P_COUT p.i3
 #define P_PLANEIN p.i4
 #define P_PLANEOUT p.i5
+#define P_COUNT p.i0
+#define P_GRIDW p.i2
+#define P_PLANE p.i3
+void emuPrelu() {
+#include "kernels/kernel_prelu.inc"
+}
+#undef P_COUNT
+#undef P_GRIDW
+#undef P_PLANE
+
 void emuShuffle() {
 #include "kernels/kernel_shuffle.inc"
 }
@@ -263,6 +217,7 @@ bool Emulator::run(const Program& prog, const float* in, float* out, std::string
             const bool isElt = cmd.kernel == Kernel::Eltwise || cmd.kernel == Kernel::Eltwise_F16;
             const bool isRes = cmd.kernel == Kernel::Resize || cmd.kernel == Kernel::Resize_F16;
             const bool isShuf = cmd.kernel == Kernel::Shuffle || cmd.kernel == Kernel::Shuffle_F16;
+            const bool isPrelu = cmd.kernel == Kernel::Prelu || cmd.kernel == Kernel::Prelu_F16;
             if (!isElt && !isRes && !isShuf) {
                 const Bind& wb = cmd.bind[1];
                 ok1 = wb.buffer == 1 && wb.offset % 256 == 0 && wb.offset + wb.size <= weights_.size() * sizeof(float);
@@ -276,8 +231,8 @@ bool Emulator::run(const Program& prog, const float* in, float* out, std::string
             }
             std::memcpy(&p, &cmd.push, sizeof(p));
             if (sizeof(p) != sizeof(cmd.push)) return fail("push constant layout mismatch");
-            const unsigned lx = isElt ? 64u : 16u;
-            const unsigned ly = isElt ? 1u : 4u;
+            const unsigned lx = (isElt || isPrelu) ? 64u : 16u;
+            const unsigned ly = (isElt || isPrelu) ? 1u : 4u;
             for (unsigned gz = 0; gz < cmd.gz; ++gz) {
                 for (unsigned gy = 0; gy < cmd.gy; ++gy) {
                     for (unsigned gx = 0; gx < cmd.gx; ++gx) {
@@ -285,11 +240,11 @@ bool Emulator::run(const Program& prog, const float* in, float* out, std::string
                             for (unsigned ix = 0; ix < lx; ++ix) {
                                 gl_GlobalInvocationID = {gx * lx + ix, gy * ly + iy, gz};
                                 if (cmd.kernel == Kernel::Conv3x3 || cmd.kernel == Kernel::Conv3x3_F16) emuConv();
-                                else if (cmd.kernel == Kernel::Conv3x3_F16Math) emuConvHA();
                                 else if (cmd.kernel == Kernel::ConvK || cmd.kernel == Kernel::ConvK_F16) emuConvK();
                                 else if (cmd.kernel == Kernel::Conv3x3_4oc || cmd.kernel == Kernel::Conv3x3_4oc_F16) emuConv4oc();
                                 else if (cmd.kernel == Kernel::Conv3x3_8px || cmd.kernel == Kernel::Conv3x3_8px_F16) emuConv8px();
                                 else if (isElt) emuElt();
+                                else if (isPrelu) emuPrelu();
                                 else if (isShuf) emuShuffle();
                                 else emuResize();
                             }

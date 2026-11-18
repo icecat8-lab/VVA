@@ -43,7 +43,7 @@ def main():
         for name, _, macro, _defines in gen_spirv.SHADERS:
             T.check("static const uint32_t %s[]" % name in header, "header holds %s" % name)
         T.check("#define VVA_SPV_CONV4OC 1" in header and "#define VVA_SPV_CONV8PX 1" in header, "both optional variants are marked present")
-        T.check(all(("#define %s 1" % m) in header for m in ("VVA_SPV_CONV_H", "VVA_SPV_CONV_HA", "VVA_SPV_ELT_H", "VVA_SPV_RES_H")),
+        T.check(all(("#define %s 1" % m) in header for m in ("VVA_SPV_CONV_H", "VVA_SPV_ELT_H", "VVA_SPV_RES_H", "VVA_SPV_PRELU_H")),
                 "the fp16 variants are marked present")
 
         r = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "gen_spirv.py"), "--glslc",
@@ -54,11 +54,11 @@ def main():
         T.check("simulated compile error" in r.stderr and "leaving out" in r.stderr, "the compiler message is shown")
 
         r = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "gen_spirv.py"), "--glslc",
-                            fake_glslc(tmp, fail_define="VVA_MATH_F16"), "--out", out], capture_output=True, text=True)
+                            fake_glslc(tmp, fail_define="VVA_STORE_F16"), "--out", out], capture_output=True, text=True)
         header = open(out).read()
-        T.check(r.returncode == 0 and "#define VVA_SPV_CONV_HA 0" in header and "#define VVA_SPV_CONV_H 1" in header
-                and "#define VVA_SPV_ELT_H 1" in header and "#define VVA_SPV_CONV4OC 1" in header,
-                "a failing fp16-math shader only drops that variant: " + r.stderr[-200:])
+        T.check(r.returncode == 0 and "#define VVA_SPV_CONV_H 0" in header and "#define VVA_SPV_ELT_H 0" in header
+                and "#define VVA_SPV_CONV4OC 1" in header and "#define VVA_SPV_PRELU 1" in header,
+                "failing fp16 shaders only drop the fp16 variants: " + r.stderr[-200:])
 
         r = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "gen_spirv.py"), "--glslc",
                             fake_glslc(tmp, fail_on=("eltwise.comp",)), "--out", os.path.join(tmp, "x.h")], capture_output=True, text=True)

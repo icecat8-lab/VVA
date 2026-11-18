@@ -34,7 +34,6 @@ layout(push_constant) uniform Params {
 #define P_YBASE p.i4
 #define P_HASRES p.i5
 #define P_PLANE p.i6
-#define P_SLOPE p.i7
 #define P_ALPHA p.f0
 #define P_SCALE p.f1
 #define P_K p.j0
