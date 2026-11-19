@@ -34,6 +34,8 @@ public:
     virtual int variantCount() const = 0;
     virtual void setVariant(int variant) = 0;
     virtual bool variantUsable(int variant) const { (void)variant; return true; }
+    virtual double speedHint() const { return 0.0; }
+    virtual void setSpeedHint(double flopsPerSecond) { (void)flopsPerSecond; }
     virtual int variantIndex() const = 0;
     virtual int inChannels() const = 0;
     virtual int outChannels() const = 0;

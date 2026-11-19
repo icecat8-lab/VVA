@@ -368,6 +368,10 @@ public:
 
     int variantIndex() const override { return variant_; }
 
+    double speedHint() const override { return flopsPerSec_; }
+
+    void setSpeedHint(double flopsPerSecond) override { flopsPerSec_ = flopsPerSecond > 0.0 ? flopsPerSecond : 0.0; }
+
     bool fits(int h, int w) override { return estimateBytes(h, w) > 0; }
 
     size_t estimateBytes(int h, int w) override {

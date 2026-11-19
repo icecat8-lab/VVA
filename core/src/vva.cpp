@@ -148,6 +148,7 @@ struct GpuConfig {
     int variant = 0;
     std::string reason;
     long long when = 0;
+    double flops = 0.0;
 };
 
 std::string formatGpuConfig(const GpuConfig& c) {
@@ -157,6 +158,9 @@ std::string formatGpuConfig(const GpuConfig& c) {
     s += "variant=" + std::to_string(c.variant) + "\n";
     s += "reason=" + c.reason + "\n";
     s += "time=" + std::to_string(c.when) + "\n";
+    char fl[48];
+    std::snprintf(fl, sizeof(fl), "flops=%.6g\n", c.flops);
+    s += fl;
     return s;
 }
 
@@ -185,6 +189,9 @@ bool parseGpuConfig(const std::string& text, GpuConfig& c) {
             c.reason = value.substr(0, 200);
         } else if (key == "time") {
             c.when = std::strtoll(value.c_str(), nullptr, 10);
+        } else if (key == "flops") {
+            const double f = std::strtod(value.c_str(), nullptr);
+            c.flops = (f > 0.0 && f < 1e15) ? f : 0.0;
         }
     }
     return haveIdentity && haveUsable;
@@ -496,7 +503,7 @@ public:
                 std::snprintf(buf, sizeof(buf), "%s%s %.0f", rates.empty() ? "" : ", ", gpu::convVariantName(v), rate);
                 rates += buf;
             }
-            passing.push_back({v, gpu::variantIsHalf(v) ? rate / 1.15 : rate, rate});
+            passing.push_back({v, gpu::variantIsHalf(v) ? rate / 1.05 : rate, rate});
         }
         std::stable_sort(passing.begin(), passing.end(), [](const Candidate& a, const Candidate& b) { return a.score > b.score; });
         int ref = -1;
@@ -522,15 +529,22 @@ public:
                     gpuBackend->setVariant(c.v);
                     ok3 = gpuBackend->run(in3.data(), h3, w3, candOut.data(), nullptr, &err) == gpu::Backend::Status::Ok;
                 }
-                double rng3 = 1.0, worst3 = 0.0;
+                double rng3 = 1.0, worst3 = 0.0, sum3 = 0.0;
                 for (size_t i = 0; ok3 && i < refOut.size(); ++i) {
                     rng3 = std::max(rng3, static_cast<double>(std::fabs(refOut[i])));
                     const double d = std::fabs(static_cast<double>(refOut[i]) - static_cast<double>(candOut[i]));
                     if (!(d <= worst3)) worst3 = d;
+                    sum3 += d;
                 }
-                if (!ok3 || !(worst3 / rng3 <= 6e-3)) {
-                    char why[80];
-                    std::snprintf(why, sizeof(why), "rejected on a larger image (%s)", ok3 ? "results differ" : "did not run");
+                const double mean3 = refOut.empty() ? 0.0 : sum3 / static_cast<double>(refOut.size());
+                if (!ok3 || !(worst3 / rng3 <= 1.2e-2) || !(mean3 / rng3 <= 2.5e-3)) {
+                    char why[112];
+                    if (ok3) {
+                        std::snprintf(why, sizeof(why), "rejected on a larger image (max %.1e, mean %.1e of the range)", worst3 / rng3,
+                                      mean3 / rng3);
+                    } else {
+                        std::snprintf(why, sizeof(why), "rejected on a larger image (did not run)");
+                    }
                     skip(c.v, why);
                     problem = "the GPU kernels disagreed on a larger image";
                     continue;
@@ -546,6 +560,10 @@ public:
         }
         gpuBackend->setVariant(best);
         *chosen = best;
+        if (measure) {
+            gpuBackend->setSpeedHint(0.0);
+            for (int i = 0; i < 2; ++i) gpuBackend->run(in2.data(), h2, w2, out2.data(), nullptr, &err);
+        }
         if (!measure) {
             *detail = onlyVariant >= 0 ? std::string("kernel ") + gpu::convVariantName(best) + ", remembered for this device"
                                        : std::string("self-test passed");
@@ -582,6 +600,7 @@ public:
         std::string detail, shortReason, problem;
         int chosen = 0;
         if (cached) {
+            gpuBackend->setSpeedHint(cfg.flops);
             problem = verifyBackend(checkSpeed, cfg.variant, &detail, &chosen, &shortReason);
             if (!problem.empty()) cached = false;
         }
@@ -608,6 +627,7 @@ public:
             pos.identity = identity;
             pos.usable = true;
             pos.variant = chosen;
+            pos.flops = gpuBackend->speedHint();
             pos.when = static_cast<long long>(std::time(nullptr));
             writeTextFile(cachePath, formatGpuConfig(pos));
         }

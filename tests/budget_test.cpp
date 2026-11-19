@@ -41,6 +41,14 @@ int main() {
     CHECK(!vva::gpuConfigFresh(c, c.identity, 3, 1000000 - 5), "a clock that went backwards: not valid");
     c.variant = 5;
     CHECK(!vva::gpuConfigFresh(c, c.identity, 3, 1000000 + 10), "a variant that does not exist: not valid");
+    c.variant = 2;
+    c.flops = 8.5e10;
+    CHECK(vva::parseGpuConfig(vva::formatGpuConfig(c), back) && back.flops > 8.4e10 && back.flops < 8.6e10,
+          "the measured GPU speed is stored and read back");
+    CHECK(vva::parseGpuConfig("vva-gpu-config 3\nidentity=x\nusable=1\nflops=-5\n", back) && back.flops == 0.0,
+          "a negative speed is ignored");
+    CHECK(vva::parseGpuConfig("vva-gpu-config 3\nidentity=x\nusable=1\n", back) && back.flops == 0.0,
+          "a result without a speed is still valid");
     CHECK(!vva::parseGpuConfig("garbage", back), "garbage is rejected");
     CHECK(!vva::parseGpuConfig("vva-gpu-config 3\nvariant=1\n", back), "a result without identity is rejected");
     CHECK(!vva::parseGpuConfig("vva-gpu-config 2\nidentity=x\nusable=1\n", back), "another format version is rejected");
