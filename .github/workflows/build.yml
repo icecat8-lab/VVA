@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version_tag:
-        description: 'Release tag (e.g. v1.5.2)'
+        description: 'Release tag (e.g. v1.5.3)'
         required: true
-        default: 'v1.5.2'
+        default: 'v1.5.3'
 
 permissions:
   contents: write
@@ -29,6 +29,7 @@ jobs:
           /tmp/venv/bin/python tests/test_format.py
           /tmp/venv/bin/python tests/test_converter.py
           /tmp/venv/bin/python tests/check_backend.py
+          /tmp/venv/bin/python tests/check_version.py
           /tmp/venv/bin/python tests/test_ops.py
           /tmp/venv/bin/python tests/test_archs.py
           /tmp/venv/bin/python tests/test_onnx.py

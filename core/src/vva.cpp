@@ -1,4 +1,5 @@
 #include "vva/vva.h"
+#include "vva/version.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -582,7 +583,7 @@ public:
     }
 
     void finishGpuSetup(bool checkSpeed) {
-        const std::string identity = gpuBackend->identity() + (halfAllowed ? "" : "|precise");
+        const std::string identity = gpuBackend->identity() + "|vva " VVA_ENGINE_VERSION + (halfAllowed ? "" : "|precise");
         const std::string cacheStem = (checkSpeed && !modelPath.empty()) ? cacheBase(modelPath) : std::string();
         const std::string cachePath = cacheStem.empty() ? std::string() : cacheStem + ".gpucfg";
         GpuConfig cfg;
